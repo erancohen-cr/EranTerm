@@ -384,14 +384,14 @@ body.folded .navitem .gedit { display: none; }
 .linkbtn:hover { color: var(--accent); }
 #scriptDlg .sc-tags { margin: -4px 0 8px; }
 /* SSH (Connect) and Desktop buttons: one fixed width, label left, protocol status right */
-.actions .desk, .actions .conn { width: 172px; display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; vertical-align: middle; }
+.actions .desk, .actions .conn { width: 96px; min-width: 0; padding: 5px 7px; display: inline-flex; align-items: center; justify-content: space-between; gap: 4px; vertical-align: middle; }
 .actions .desk.ph { visibility: hidden; }
 .actions .blbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .av { flex: none; display: inline-block; }
 .av.up, .av.down { width: 7px; height: 7px; border-radius: 50%; }
 .av.up { background: var(--accent); box-shadow: 0 0 5px var(--accent); }
 .av.down { background: var(--error); }
-.av.unknown { font-size: 10px; font-weight: 400; opacity: .75; }
+.av.unknown { font-size: 9px; font-weight: 400; opacity: .75; }
 td > .av { margin-left: 8px; vertical-align: middle; }
 td > .av.unknown { display: none; } /* server dot: only up/down */
 .dfilter { display: flex; gap: 6px; margin-bottom: 8px; }
@@ -486,7 +486,11 @@ dialog .dlgsec { margin: 14px 0 6px; font-size: 12px; letter-spacing: .06em; tex
 #aiMsg.ok { color: var(--accent); }
 #aiMsg.warn { color: var(--warn); }
 #aiMsg.error { color: var(--error); }
-#settingsDlg { width: 520px; }
+#settingsDlg { width: 560px; }
+.stabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 12px 0 10px; }
+.stabs button { border: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); padding: 6px 10px; }
+.stabs button.on { background: var(--panel2); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+.spane { min-height: 230px; }
 
 /* ---------- home: Alerts column ---------- */
 .alertcell { position: relative; white-space: nowrap; }

@@ -257,7 +257,7 @@ function serverRow(s) {
       withAv(typeOf(s) === 'rdp'
         ? iconBtn('🖥 Desktop', `Open Remote Desktop (RDP, port ${s.port})`, () => openRdp(s), 'desk')
         : iconBtn(...(DESKTOP[s.os] || DESKTOP['']), () => openDesktop(s), 'desk'), s.id, 'desk'),
-      withAv(iconBtn(views.has(s.id) ? '↗ Open' : '▶ Connect',
+      withAv(iconBtn(views.has(s.id) ? '↗ Open' : '▶ SSH',
         typeOf(s) === 'rdp' ? `Open SSH (Windows OpenSSH, port ${s.sshPort || 22}) with the same login` : 'Connect', () => connectServer(s), 'primary conn'), s.id, 'ssh')));
   tr.ondblclick = () => connectServer(s);
   return tr;
@@ -348,7 +348,7 @@ async function openRdp(s) {
 // Desktop button for SSH servers, by the server's OS (unknown until the first connection).
 const DESKTOP = {
   windows: ['🖥 RDP', 'Open with Remote Desktop (Windows App, port 3389)'],
-  macos: ['🖥 Screen Sharing', 'Open with macOS Screen Sharing (Remote Management must be on)'],
+  macos: ['🖥 Screen','Open with macOS Screen Sharing (Remote Management must be on)'],
   linux: ['🖥 VNC', 'Open the desktop with Screen Sharing (needs a VNC server on port 5900)'],
   unix: ['🖥 VNC', 'Open the desktop with Screen Sharing (needs a VNC server on port 5900)'],
   '': ['🖥 Desktop', 'Open the remote desktop: RDP for Windows, Screen Sharing for macOS/Linux (detects the OS over SSH)'],
@@ -537,10 +537,16 @@ async function openSettings(focusKey = false) {
     .map(([value, d]) => el('option', { value, textContent: d.label + (d.hasKey ? '  ✓' : '') })));
   f.elements.aiProvider.value = aiSettings.aiProvider;
   showProvider(aiSettings.aiProvider);
+  settingsTab(focusKey ? 'ai' : 'avail');
   $('#settingsDlg').returnValue = '';
   $('#settingsDlg').showModal();
   if (focusKey) f.elements.apiKey.focus();
 }
+function settingsTab(k) {
+  for (const b of document.querySelectorAll('#settingsForm .stabs button')) b.classList.toggle('on', b.dataset.tab === k);
+  for (const p of document.querySelectorAll('#settingsForm .spane')) p.hidden = p.dataset.pane !== k;
+}
+for (const b of document.querySelectorAll('#settingsForm .stabs button')) b.onclick = () => settingsTab(b.dataset.tab);
 $('#settingsForm').elements.aiProvider.onchange = e => showProvider(e.target.value);
 $('#logPick').onclick = async () => {
   const dir = await api.settings.pickLogDir($('#settingsForm').elements.logDir.value);
@@ -619,8 +625,7 @@ $('#settingsForm').addEventListener('submit', async e => {
     $('#settingsDlg').close('save');
     toast(`Settings saved. AI: ${aiSettings.providers[f.aiProvider.value].label}`);
   } catch (err) {
-    aiMsg(aiNoKeyText(err), 'error');
-  } finally { btn.disabled = false; }
+    aiMsg(aiNoKeyText(err), 'error');  } finally { btn.disabled = false; }
 });
 $('#settingsDlg').addEventListener('close', applyTheme);
 

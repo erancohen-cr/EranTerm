@@ -405,15 +405,23 @@
       <label>Theme
         <select name="theme"><option value="system">System (follow macOS)</option><option value="light">Light</option><option value="dark">Dark</option></select>
       </label>
-      <h4 class="dlgsec">Server availability</h4>
+      <nav class="stabs">
+        <button type="button" data-tab="avail">Server Availability</button>
+        <button type="button" data-tab="updates">Updates</button>
+        <button type="button" data-tab="logging">Logging</button>
+        <button type="button" data-tab="ai">AI</button>
+        <button type="button" data-tab="notify">Notifications</button>
+      </nav>
+      <section class="spane" data-pane="avail" hidden>
       <label class="row"><input name="availOn" type="checkbox"> Check servers in the background (SSH / desktop ports)</label>
       <label>Check every (seconds) <input name="availSec" type="number" min="10" step="10"></label>
-      <label class="row"><input name="notify" type="checkbox"> Desktop notifications (server down / back up, deployment finished)</label>
       <p class="hint">A quick TCP connect to each port, 2 s timeout. Turn it off per server in its Edit dialog.</p>
-      <h4 class="dlgsec">Updates</h4>
+      </section>
+      <section class="spane" data-pane="updates" hidden>
       <label class="row"><input name="autoUpdate" type="checkbox"> Update automatically when a new release is published</label>
       <p class="hint" id="updHint"></p>
-      <h4 class="dlgsec">Logging</h4>
+      </section>
+      <section class="spane" data-pane="logging" hidden>
       <label class="row"><input name="logToFile" type="checkbox"> Save the app log to a file (eranterm.log)</label>
       <label>Log folder
         <span class="modelrow">
@@ -424,7 +432,8 @@
       </label>
       <button type="button" id="logConsole">Open Debug Console</button>
       <p class="hint">Connections, errors and update checks. Passwords and keys are never logged. Live view: Help → Debug Console (Ctrl/⌘ + Shift + L).</p>
-      <h4 class="dlgsec">AI configuration</h4>
+      </section>
+      <section class="spane" data-pane="ai" hidden>
       <label>Provider <select name="aiProvider"></select></label>
       <p id="keyStatus" class="hint"></p>
       <label><span id="keyLabel">API key</span> <input name="apiKey" type="password" placeholder="leave blank to keep the saved key" autocomplete="off"></label>
@@ -437,8 +446,13 @@
         </span>
       </label>
       <datalist id="aiModelList"></datalist>
-      <p id="aiMsg" class="hint"></p>
       <p class="hint">Used by Ask AI in Terminal and Logs. Each provider keeps its own key, encrypted with your macOS Keychain. Logs and terminal text are sent to the selected provider only when you click Ask AI.</p>
+      </section>
+      <section class="spane" data-pane="notify" hidden>
+      <label class="row"><input name="notify" type="checkbox"> Show desktop notifications</label>
+      <p class="hint">Native OS popups: server down / back up, deployment finished, metric alerts.</p>
+      </section>
+      <p id="aiMsg" class="hint"></p>
       <menu><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary">Save</button></menu>
     </form>
   </dialog>
