@@ -223,6 +223,9 @@ function paintAvail() {
 }
 // OS popup (HTML5 Notification = native notification in Electron). Off in Settings → notifications.
 const notifyOn = () => { try { return localStorage.getItem('notify') !== 'off'; } catch { return true; } };
+// Module a server page opens on (Settings → "Open servers in"). Default: File Manager.
+const PANELS = ['files', 'term', 'logs', 'stats'];
+const defaultPanel = () => { try { const p = localStorage.getItem('defaultPanel'); return PANELS.includes(p) ? p : 'files'; } catch { return 'files'; } };
 function notify(title, body) {
   try { if (notifyOn()) new Notification(title, { body }); } catch { /* notifications blocked */ }
 }
@@ -532,6 +535,7 @@ async function openSettings(focusKey = false) {
   f.elements.availOn.checked = aiSettings.avail.on;
   f.elements.availSec.value = aiSettings.avail.intervalSec;
   f.elements.notify.checked = notifyOn();
+  f.elements.defaultPanel.value = defaultPanel();
   $('#updHint').textContent = `You have version ${aiSettings.version}. Checks at startup and every 6 hours. Help → Check for Updates… checks now.`;
   f.elements.aiProvider.replaceChildren(...Object.entries(aiSettings.providers)
     .map(([value, d]) => el('option', { value, textContent: d.label + (d.hasKey ? '  ✓' : '') })));
@@ -621,7 +625,7 @@ $('#settingsForm').addEventListener('submit', async e => {
       await api.settings.setAvail({ on: f.availOn.checked, intervalSec: f.availSec.value });
     }
     if (f.notify.checked && Notification.permission === 'default') Notification.requestPermission();
-    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); } catch { /* ignore */ }
+    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); } catch { /* ignore */ }
     $('#settingsDlg').close('save');
     toast(`Settings saved. AI: ${aiSettings.providers[f.aiProvider.value].label}`);
   } catch (err) {
@@ -1791,7 +1795,7 @@ async function openServer(s) {
     openServer(servers.find(x => x.id === s.id) || s);
   };
 
-  pickPanel('files');
+  pickPanel(defaultPanel());
   show(s.id);
   try {
     v.connId = await api.ssh.connect(s.id);
