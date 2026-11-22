@@ -77,7 +77,7 @@ jobs:
             npm version "$V" --no-git-tag-version --allow-same-version >/dev/null
             git commit -qam "Release v$V" || true
             git push origin "$B"
-            [ "$B" = main ] && echo "TAG_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+            if [ "$B" = main ]; then echo "TAG_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"; fi  # `[ ] &&` as the loop's last command fails the step on dev
           done
       - name: Create release
         env:
