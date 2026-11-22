@@ -1,4 +1,4 @@
-/* global api, el, iconBtn, toast, cleanErr, servers */
+/* global api, el, iconBtn, toast, cleanErr, servers, notify */
 // Deployments panel: edit saved deployments, run them on many servers, watch per-server progress.
 // Runs happen in main (deploy.js); this file only edits definitions and renders events.
 
@@ -34,6 +34,7 @@ const D_FINAL = ['success', 'warning', 'failed', 'cancelled', 'skipped'];
 function initDeployments(panel) {
   let list = [], cur = null, dirty = false, lib = [];
   let shown = null; // run whose status view is on screen
+  const tFilter = { group: null, q: '' }; // target-server filter (view only, not saved)
   const runs = new Map(); // deploymentId -> last run (kept so its status can be reopened)
   const listEl = panel.querySelector('.dl');
   const ed = panel.querySelector('.deditor');
@@ -121,17 +122,39 @@ function initDeployments(panel) {
       r?.running ? null : el('button', { className: 'primary', textContent: '🚀 Run deployment', onclick: start }));
 
     const ssh = servers.filter(x => x.type !== 'rdp');
+    // Filters only narrow what is shown; selection is kept. Applied by hiding chips so typing keeps focus.
+    const shown$ = x => (!tFilter.group || (x.group || '') === tFilter.group) &&
+      (!tFilter.q || [x.name, x.host, x.group || '', x.details || '', ...(x.tags || [])].some(v => v.toLowerCase().includes(tFilter.q)));
+    const chips = ssh.map(x => {
+      const cb = el('input', { type: 'checkbox', checked: d.targets.includes(x.id) });
+      cb.onchange = () => {
+        d.targets = cb.checked ? [...d.targets, x.id] : d.targets.filter(id => id !== x.id);
+        rerender();
+      };
+      const chip = el('label', { className: 'dchip' + (cb.checked ? ' on' : ''), hidden: !shown$(x) }, cb,
+        el('b', { textContent: x.name }), el('small', { className: 'mono', textContent: x.host }));
+      chip.srv = x;
+      return chip;
+    });
+    const applyFilter = () => chips.forEach(c => (c.hidden = !shown$(c.srv)));
+    const groups = [...new Set(ssh.map(x => x.group || ''))].sort((a, b) => a.localeCompare(b));
+    const gsel = el('select', {}, el('option', { value: '\u0000', textContent: 'All groups' }),
+      ...groups.map(g => el('option', { value: g, textContent: g || 'Ungrouped' })));
+    gsel.value = tFilter.group ?? '\u0000';
+    gsel.onchange = () => { tFilter.group = gsel.value === '\u0000' ? null : gsel.value; applyFilter(); };
+    const q = el('input', { type: 'search', placeholder: 'Filter: name, host, tag…', value: tFilter.q });
+    q.oninput = () => { tFilter.q = q.value.trim().toLowerCase(); applyFilter(); };
+    const pickShown = on => {
+      const ids = chips.filter(c => !c.hidden).map(c => c.srv.id);
+      d.targets = on ? [...new Set([...d.targets, ...ids])] : d.targets.filter(id => !ids.includes(id));
+      rerender();
+    };
     const targets = el('section', { className: 'dcard' },
       el('header', {}, el('b', { textContent: 'Target servers' }), hint(`${d.targets.length} selected`)),
-      el('div', { className: 'dchips' }, ...ssh.map(x => {
-        const cb = el('input', { type: 'checkbox', checked: d.targets.includes(x.id) });
-        cb.onchange = () => {
-          d.targets = cb.checked ? [...d.targets, x.id] : d.targets.filter(id => id !== x.id);
-          rerender();
-        };
-        return el('label', { className: 'dchip' + (cb.checked ? ' on' : '') }, cb,
-          el('b', { textContent: x.name }), el('small', { className: 'mono', textContent: x.host }));
-      })),
+      el('div', { className: 'dfilter' }, gsel, q,
+        el('button', { textContent: 'Select shown', onclick: () => pickShown(true) }),
+        el('button', { textContent: 'Clear shown', onclick: () => pickShown(false) })),
+      el('div', { className: 'dchips' }, ...chips),
       el('label', { className: 'chk' }, (() => {
         const cb = el('input', { type: 'checkbox', checked: d.parallel });
         cb.onchange = () => { d.parallel = cb.checked; touch(); };
@@ -382,6 +405,7 @@ function initDeployments(panel) {
       paintTime(run);
       paintProgress(run);
       toast(`${run.dep.name}: ${summary}`, !!failed);
+      notify(`🚀 Deployment ${run.dep.name}`, summary);
       renderList();
       if (cur?.id === run.dep.id) renderEditor();
       return;

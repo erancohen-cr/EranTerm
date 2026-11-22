@@ -69,6 +69,7 @@ async function runTarget(dep, target, io, signal) {
         if (!dep.files?.length) continue;
         stage(st, 'running');
         for (const f of dep.files) {
+          if (signal?.aborted) throw new Error('Cancelled');
           log(`↑ ${path.basename(f.local)} → ${f.remoteDir || '~'}`, 'cmd');
           await sess.upload(f.local, f.remoteDir);
         }

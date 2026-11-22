@@ -197,9 +197,51 @@ async function openMetrics(s) {
   v.pickPanel?.('stats');
 }
 
+// ---- availability (probed in main, pushed every interval) ----
+// Painted in place (data-av="<serverId>:<server|ssh|desk>") so a refresh never rebuilds the table.
+let avail = {};
+const AV_TEXT = { up: 'available', down: 'not available', unknown: 'unknown' };
+const avMark = (id, key) => {
+  const e = el('span', { className: 'av' });
+  e.dataset.av = `${id}:${key}`;
+  return e;
+};
+// Button label on the left, protocol status on the right (buttons share one width, see .actions .desk/.conn).
+const withAv = (btn, id, key) => {
+  btn.replaceChildren(el('span', { className: 'blbl', textContent: btn.textContent }), avMark(id, key));
+  return btn;
+};
+function paintAvail() {
+  for (const e of document.querySelectorAll('[data-av]')) {
+    const [id, key] = e.dataset.av.split(':');
+    const st = avail[id]?.[key] || '';
+    e.className = 'av' + (st ? ' ' + st : '');
+    e.textContent = key !== 'server' && st === 'unknown' ? 'unknown' : '';
+    e.title = st ? `${key === 'server' ? 'Server' : key === 'ssh' ? 'SSH' : 'Desktop'}: ${AV_TEXT[st]} · checked ${new Date(avail[id].at).toLocaleTimeString()}`
+      : 'Availability not checked (off in Settings or for this server)';
+  }
+}
+// OS popup (HTML5 Notification = native notification in Electron). Off in Settings → notifications.
+const notifyOn = () => { try { return localStorage.getItem('notify') !== 'off'; } catch { return true; } };
+function notify(title, body) {
+  try { if (notifyOn()) new Notification(title, { body }); } catch { /* notifications blocked */ }
+}
+function onAvail(next) {
+  for (const [id, a] of Object.entries(next)) {
+    const was = avail[id]?.server;
+    if (!was || was === a.server) continue; // first check or no change: stay quiet
+    const s = servers.find(x => x.id === id);
+    if (s) notify(a.server === 'up' ? `✅ ${s.name} is back up` : `⛔ ${s.name} is not responding`, s.host);
+  }
+  avail = next;
+  paintAvail();
+}
+api.avail.onUpdate(onAvail);
+api.avail.get().then(a => { avail = a; paintAvail(); });
+
 function serverRow(s) {
   const tr = el('tr', { className: 'srow' + (alertState.get(s.id)?.size ? ' alerting' : '') },
-    el('td', {}, el('span', { className: 'dot' + (views.has(s.id) ? ' on' : '') }), el('b', { textContent: s.name })),
+    el('td', {}, el('span', { className: 'dot' + (views.has(s.id) ? ' on' : '') }), el('b', { textContent: s.name }), avMark(s.id, 'server')),
     el('td', {}, el('span', { className: 'proto ' + typeOf(s), textContent: typeOf(s).toUpperCase() })),
     el('td', { className: 'mono', title: s.userLabel ? `Login: saved user "${s.userLabel}"` : '' },
       `${s.username ? s.username + '@' : ''}${s.host}` + (s.port !== defaultPort(s) ? `:${s.port}` : ''),
@@ -212,11 +254,11 @@ function serverRow(s) {
       iconBtn(s.starred ? '★' : '☆', s.starred ? 'Unfavorite' : 'Favorite', () => toggleStar(s), 'icon' + (s.starred ? ' star' : '')),
       iconBtn('✎', 'Edit', () => editServer(s)),
       iconBtn('🗑', 'Delete', () => deleteServer(s), 'icon danger'),
-      typeOf(s) === 'rdp'
+      withAv(typeOf(s) === 'rdp'
         ? iconBtn('🖥 Desktop', `Open Remote Desktop (RDP, port ${s.port})`, () => openRdp(s), 'desk')
-        : iconBtn(...(DESKTOP[s.os] || DESKTOP['']), () => openDesktop(s), 'desk'),
-      iconBtn(views.has(s.id) ? '↗ Open' : '▶ Connect',
-        typeOf(s) === 'rdp' ? `Open SSH (Windows OpenSSH, port ${s.sshPort || 22}) with the same login` : 'Connect', () => connectServer(s), 'primary')));
+        : iconBtn(...(DESKTOP[s.os] || DESKTOP['']), () => openDesktop(s), 'desk'), s.id, 'desk'),
+      withAv(iconBtn(views.has(s.id) ? '↗ Open' : '▶ Connect',
+        typeOf(s) === 'rdp' ? `Open SSH (Windows OpenSSH, port ${s.sshPort || 22}) with the same login` : 'Connect', () => connectServer(s), 'primary conn'), s.id, 'ssh')));
   tr.ondblclick = () => connectServer(s);
   return tr;
 }
@@ -250,6 +292,7 @@ function renderServers() {
     if (!shut) rows.push(...members.map(serverRow));
   }
   $('#serverRows').replaceChildren(...rows);
+  paintAvail();
   $('#emptyHome').hidden = servers.length > 0;
 }
 // ---- groups: new / rename / delete ----
@@ -339,6 +382,7 @@ function editServer(s = {}) {
   f.elements.tags.value = (s.tags || []).join(', ');
   f.elements.details.value = s.details || '';
   f.elements.starred.checked = !!s.starred;
+  f.elements.probe.checked = !s.noProbe;
   $('#serverDlg').returnValue = ''; // Esc must not reuse the last 'save'
   $('#serverDlg').showModal();
 }
@@ -375,7 +419,7 @@ $('#serverDlg').addEventListener('close', async () => {
     name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, userId: e.userId.value,
     username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
     tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
-    details: e.details.value,
+    details: e.details.value, noProbe: !e.probe.checked,
   });
   refreshServers();
 });
@@ -485,6 +529,9 @@ async function openSettings(focusKey = false) {
   f.elements.autoUpdate.checked = aiSettings.autoUpdate;
   f.elements.logToFile.checked = aiSettings.logToFile;
   f.elements.logDir.value = aiSettings.logDir;
+  f.elements.availOn.checked = aiSettings.avail.on;
+  f.elements.availSec.value = aiSettings.avail.intervalSec;
+  f.elements.notify.checked = notifyOn();
   $('#updHint').textContent = `You have version ${aiSettings.version}. Checks at startup and every 6 hours. Help → Check for Updates… checks now.`;
   f.elements.aiProvider.replaceChildren(...Object.entries(aiSettings.providers)
     .map(([value, d]) => el('option', { value, textContent: d.label + (d.hasKey ? '  ✓' : '') })));
@@ -564,7 +611,11 @@ $('#settingsForm').addEventListener('submit', async e => {
     if (f.logToFile.checked !== aiSettings.logToFile || f.logDir.value.trim() !== aiSettings.logDir) {
       await api.settings.setLog({ logToFile: f.logToFile.checked, logDir: f.logDir.value });
     }
-    try { localStorage.setItem('theme', f.theme.value); } catch { /* ignore */ }
+    if (f.availOn.checked !== aiSettings.avail.on || Number(f.availSec.value) !== aiSettings.avail.intervalSec) {
+      await api.settings.setAvail({ on: f.availOn.checked, intervalSec: f.availSec.value });
+    }
+    if (f.notify.checked && Notification.permission === 'default') Notification.requestPermission();
+    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); } catch { /* ignore */ }
     $('#settingsDlg').close('save');
     toast(`Settings saved. AI: ${aiSettings.providers[f.aiProvider.value].label}`);
   } catch (err) {
@@ -1530,7 +1581,7 @@ async function openServer(s) {
         state.set(k, { val, threshold: a.threshold, since: Date.now() });
         const msg = `${s.name}: ${KNAME[k]} at ${Math.round(val)}% (alert above ${a.threshold}%)`;
         toast('🔔 ' + msg, true);
-        try { new Notification('EranTerm alert', { body: msg }); } catch { /* notifications blocked */ }
+        notify('EranTerm alert', msg);
       } else if (val < a.threshold - 5) { firing[k] = false; state.delete(k); }
       else if (firing[k]) state.set(k, { ...state.get(k), val }); // keep the latest value for the tooltip
     }

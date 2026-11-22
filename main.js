@@ -223,8 +223,10 @@ ipcMain.handle('servers:save', (_e, s) => {
     userId: s.userId && users().some(u => u.id === s.userId) ? s.userId : '',
     passwordEnc: s.password ? enc(s.password) : prev?.passwordEnc || '',
     os: type === 'rdp' ? 'windows' : prev?.host === String(s.host) ? prev.os || '' : '', // new host: detect again
+    noProbe: !!s.noProbe, // availability checks off for this server
   };
   writeJson('servers.json', prev ? list.map(x => (x.id === rec.id ? rec : x)) : [...list, rec]);
+  if (!prev || prev.host !== rec.host || prev.port !== rec.port || prev.sshPort !== rec.sshPort || !!prev.noProbe !== rec.noProbe) scheduleAvail();
   return publicServer(rec);
 });
 
@@ -300,6 +302,7 @@ ipcMain.handle('log:openFolder', () => shell.openPath(logSettings().logDir));
 ipcMain.handle('settings:get', () => ({
   version: app.getVersion(),
   autoUpdate: autoUpdateOn(),
+  avail: availSettings(),
   ...logSettings(),
   aiProvider: aiProvider(),
   providers: Object.fromEntries(Object.entries(AI_PROVIDERS).map(([id, d]) => [id, {
@@ -531,6 +534,56 @@ ipcMain.handle('remote:open', async (_e, serverId) => {
   await shell.openExternal(`vnc://${s.username ? encodeURIComponent(s.username) + '@' : ''}${host}`);
   patchServer(serverId, { lastSeen: Date.now() });
   return { os, ...copyPassword(s) };
+});
+
+// ---------- availability (background TCP probes, pushed to the window as 'avail:update') ----------
+// One TCP connect per button port: open = 'up', refused = 'down' (host answered, service off),
+// timeout/unreachable = 'unknown'. A server is 'up' if any port answered at all (open or refused).
+// ponytail: TCP connect only (no ICMP ping: needs raw sockets / spawning ping).
+const net = require('node:net');
+const probePort = (host, port, ms = 2000) => new Promise(resolve => {
+  const sock = net.connect({ host, port: Number(port) });
+  const done = r => { sock.destroy(); resolve(r); };
+  sock.setTimeout(ms, () => done('unknown'));
+  sock.once('connect', () => done('up'));
+  sock.once('error', e => done(e.code === 'ECONNREFUSED' ? 'down' : 'unknown'));
+});
+const availSettings = () => {
+  const a = readJson('settings.json', {}).avail || {};
+  return { on: a.on !== false, intervalSec: Math.max(10, Number(a.intervalSec) || 60) };
+};
+// Ports behind each Home button. Desktop of an SSH server with unknown OS: RDP or VNC, whichever answers.
+const DESK_PORTS = { windows: [3389], macos: [5900], linux: [5900], unix: [5900] };
+const availPorts = s => (s.type === 'rdp'
+  ? { ssh: [Number(s.sshPort) || 22], desk: [Number(s.port) || 3389] }
+  : { ssh: [Number(s.port) || 22], desk: DESK_PORTS[s.os] || [3389, 5900] });
+const best = rs => (rs.includes('up') ? 'up' : rs.includes('down') ? 'down' : 'unknown');
+async function probeServer(s) {
+  const ports = availPorts(s);
+  const [ssh, desk] = await Promise.all([ports.ssh, ports.desk].map(ps => Promise.all(ps.map(pt => probePort(s.host, pt))).then(best)));
+  return { server: ssh !== 'unknown' || desk !== 'unknown' ? 'up' : 'down', ssh, desk, at: Date.now() };
+}
+const avail = {}; // serverId -> { server, ssh, desk, at }
+let availTimer, availRun = 0;
+async function probeAll() {
+  const run = ++availRun; // a newer run (settings / server change) wins
+  const st = availSettings();
+  const list = st.on ? servers().filter(s => !s.noProbe) : [];
+  const res = await Promise.all(list.map(async s => [s.id, await probeServer(s)]));
+  if (run !== availRun) return;
+  for (const k of Object.keys(avail)) delete avail[k];
+  Object.assign(avail, Object.fromEntries(res));
+  send('avail:update', avail);
+}
+function scheduleAvail() {
+  clearTimeout(availTimer);
+  probeAll().catch(e => console.error('availability:', e.message))
+    .finally(() => { availTimer = setTimeout(scheduleAvail, availSettings().intervalSec * 1000); });
+}
+ipcMain.handle('avail:get', () => avail);
+ipcMain.handle('settings:setAvail', (_e, { on, intervalSec }) => {
+  writeJson('settings.json', { ...readJson('settings.json', {}), avail: { on: !!on, intervalSec: Math.max(10, Number(intervalSec) || 60) } });
+  scheduleAvail();
 });
 
 // ---------- scripts (run through the terminal) ----------
@@ -800,19 +853,35 @@ ipcMain.handle('deploy:pickFiles', async () => {
 });
 
 // Run a command or multi-line script through `sh -s` (or its #! interpreter), streaming output.
-const runScript = (conn, script, onData) => new Promise((resolve, reject) => {
+// The remote shell first prints its PID (exec keeps it) into `pids`, so Stop can kill the process tree:
+// without a pty, dropping the SSH connection does not stop what is running on the server.
+const PID_MARK = '@@ERANTERM_PID ';
+const runScript = (conn, script, onData, pids) => new Promise((resolve, reject) => {
   const body = String(script).replace(/\r\n/g, '\n');
   const nl = body.indexOf('\n');
   const interp = body.startsWith('#!') ? body.slice(2, nl < 0 ? undefined : nl).trim() : 'sh';
-  conn.exec(`${interp} -s`, (err, stream) => {
+  conn.exec(`echo "${PID_MARK}$$"; exec ${interp} -s`, (err, stream) => {
     if (err) return reject(err);
+    let pid = null, head = '';
     const out = d => onData?.(d.toString('utf8'));
-    stream.on('data', out);
+    stream.on('data', d => {
+      if (pid !== null) return out(d);
+      head += d.toString('utf8');
+      const i = head.indexOf('\n');
+      if (i < 0) return;
+      pid = head.startsWith(PID_MARK) ? head.slice(PID_MARK.length, i).trim() : '';
+      if (/^\d+$/.test(pid)) pids?.add(pid);
+      const rest = pid ? head.slice(i + 1) : head;
+      if (rest) onData?.(rest);
+    });
     stream.stderr.on('data', out);
-    stream.on('close', code => resolve({ code: code ?? -1 }));
+    stream.on('close', code => { pids?.delete(pid); resolve({ code: code ?? -1 }); });
     stream.end(body + '\n');
   });
 });
+// Children first, so nothing gets re-parented before it is killed. ponytail: needs pgrep (Linux/macOS have it);
+// without it only the top shell is killed.
+const killTreeCmd = pids => `k(){ for c in $(pgrep -P "$1" 2>/dev/null); do k "$c"; done; kill -TERM "$1" 2>/dev/null; }; ${pids.map(p => `k ${p}`).join('; ')}`;
 
 const deployRuns = new Map(); // runId -> AbortController
 ipcMain.handle('deploy:run', (_e, d) => {
@@ -828,10 +897,18 @@ ipcMain.handle('deploy:run', (_e, d) => {
     connect: async t => {
       const connId = await openConn(t.id);
       const { conn } = conns.get(connId);
-      const kill = () => conn.end(); // cancel interrupts whatever is running
-      ac.signal.addEventListener('abort', kill);
+      if (ac.signal.aborted) { conn.end(); throw new Error('Cancelled'); } // Stop pressed while connecting
+      const pids = new Set();
+      // Stop: kill the remote commands, then drop the connection (which ends uploads and checks too).
+      const kill = () => {
+        const drop = () => conn.destroy();
+        setTimeout(drop, 3000); // the kill command itself must not hang the stop
+        if (pids.size) exec(conn, killTreeCmd([...pids])).catch(() => {}).finally(drop);
+        else drop();
+      };
+      ac.signal.addEventListener('abort', kill, { once: true });
       return {
-        exec: (script, onData) => runScript(conn, script, onData),
+        exec: (script, onData) => runScript(conn, script, onData, pids),
         upload: (local, dir) => tarUpload(conn, local, dir),
         close: () => { ac.signal.removeEventListener('abort', kill); conn.end(); },
       };
@@ -971,6 +1048,7 @@ app.whenReady().then(() => {
   console.info(`EranTerm ${app.getVersion()} started (${process.platform} ${process.arch}, Electron ${process.versions.electron})`);
   buildMenu();
   createWindow();
+  scheduleAvail();
   if (autoUpdateOn()) setTimeout(checkUpdates, 10e3); // after startup settles
 });
 app.on('window-all-closed', () => { for (const c of conns.values()) c.conn.end(); app.quit(); });

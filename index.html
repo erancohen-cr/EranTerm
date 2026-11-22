@@ -342,6 +342,7 @@
       <label>Tags <input name="tags" placeholder="prod, web"></label>
       <label>Details <textarea name="details" rows="3" placeholder="Free text: purpose, owner, notes…"></textarea></label>
       <label class="row"><input name="starred" type="checkbox"> Favorite</label>
+      <label class="row"><input name="probe" type="checkbox" checked> Check availability in the background (when on in Settings)</label>
       <menu><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary">Save</button></menu>
     </form>
   </dialog>
@@ -404,6 +405,11 @@
       <label>Theme
         <select name="theme"><option value="system">System (follow macOS)</option><option value="light">Light</option><option value="dark">Dark</option></select>
       </label>
+      <h4 class="dlgsec">Server availability</h4>
+      <label class="row"><input name="availOn" type="checkbox"> Check servers in the background (SSH / desktop ports)</label>
+      <label>Check every (seconds) <input name="availSec" type="number" min="10" step="10"></label>
+      <label class="row"><input name="notify" type="checkbox"> Desktop notifications (server down / back up, deployment finished)</label>
+      <p class="hint">A quick TCP connect to each port, 2 s timeout. Turn it off per server in its Edit dialog.</p>
       <h4 class="dlgsec">Updates</h4>
       <label class="row"><input name="autoUpdate" type="checkbox"> Update automatically when a new release is published</label>
       <p class="hint" id="updHint"></p>

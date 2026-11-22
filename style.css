@@ -383,8 +383,19 @@ body.folded .navitem .gedit { display: none; }
 .linkbtn { background: none; border: 0; color: var(--muted); font-size: 11px; padding: 2px; align-self: flex-start; }
 .linkbtn:hover { color: var(--accent); }
 #scriptDlg .sc-tags { margin: -4px 0 8px; }
-.actions .desk { min-width: 132px; display: inline-block; }
+/* SSH (Connect) and Desktop buttons: one fixed width, label left, protocol status right */
+.actions .desk, .actions .conn { width: 172px; display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; vertical-align: middle; }
 .actions .desk.ph { visibility: hidden; }
+.actions .blbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.av { flex: none; display: inline-block; }
+.av.up, .av.down { width: 7px; height: 7px; border-radius: 50%; }
+.av.up { background: var(--accent); box-shadow: 0 0 5px var(--accent); }
+.av.down { background: var(--error); }
+.av.unknown { font-size: 10px; font-weight: 400; opacity: .75; }
+td > .av { margin-left: 8px; vertical-align: middle; }
+td > .av.unknown { display: none; } /* server dot: only up/down */
+.dfilter { display: flex; gap: 6px; margin-bottom: 8px; }
+.dfilter input { flex: 1; }
 
 /* ---------- metrics tab (System Resources) ---------- */
 .panel.stats { overflow: auto; }

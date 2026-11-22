@@ -27,6 +27,11 @@ contextBridge.exposeInMainWorld('api', {
     setAutoUpdate: on => ipcRenderer.invoke('settings:setAutoUpdate', on),
     setLog: a => ipcRenderer.invoke('settings:setLog', a), // { logToFile, logDir }
     pickLogDir: cur => ipcRenderer.invoke('settings:pickLogDir', cur),
+    setAvail: a => ipcRenderer.invoke('settings:setAvail', a), // { on, intervalSec }
+  },
+  avail: {
+    get: () => ipcRenderer.invoke('avail:get'),
+    onUpdate: on('avail:update'),
   },
   log: {
     all: () => ipcRenderer.invoke('log:all'),
