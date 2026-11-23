@@ -67,7 +67,12 @@ const AI_PROVIDERS = {
   anthropic: { label: 'Claude (Anthropic)', env: 'ANTHROPIC_API_KEY', models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5'] },
   openai: { label: 'ChatGPT (OpenAI)', env: 'OPENAI_API_KEY', models: ['gpt-5', 'gpt-5-mini'] },
   gemini: { label: 'Gemini (Google)', env: 'GEMINI_API_KEY', models: ['gemini-3.1-pro-preview'] },
+  // No public chat API: runs the Cursor CLI (cursor-agent -p). Key optional: `cursor-agent login` also works.
+  cursor: { label: 'Cursor (CLI)', env: 'CURSOR_API_KEY', cli: true, models: ['auto', 'gpt-5', 'sonnet-4.5', 'sonnet-4.5-thinking', 'opus-4.1', 'grok'] },
 };
+// `cursor-agent models` output -> ids: first id-like word per line, without "(current)"-style notes.
+const parseCliModels = out => [...new Set(String(out).replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').split('\n')
+  .map(l => l.replace(/^[\s*•>-]+/, '').split(/\s+/)[0]).filter(m => m && validModel(m) && !/^(available|models?|tip|usage):?$/i.test(m)))];
 // Accept what people paste: surrounding spaces/quotes and Gemini's "models/" prefix.
 const normModel = m => String(m ?? '').trim().replace(/^["']|["']$/g, '').replace(/^models\//, '');
 const validModel = m => /^[\w.:-]{1,80}$/.test(String(m)); // also keeps the Gemini URL path safe
@@ -161,5 +166,5 @@ function remoteDir(d) {
 
 if (typeof module !== 'undefined') module.exports = {
   shq, logLevel, parseLogTime, logRowVisible, fileKind, buildRdp, remoteDir,
-  AI_PROVIDERS, validModel, normModel, buildAiRequest, parseAiResponse, buildModelsRequest, parseModels, hostKeyDecision,
+  AI_PROVIDERS, validModel, normModel, parseCliModels, buildAiRequest, parseAiResponse, buildModelsRequest, parseModels, hostKeyDecision,
 };

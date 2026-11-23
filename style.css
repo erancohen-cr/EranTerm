@@ -512,7 +512,8 @@ tr.srow.alerting td:first-child { box-shadow: inset 3px 0 var(--error); }
 
 /* file manager: nav buttons as tall as the path box */
 .fm .toolbar .up, .fm .toolbar .homedir, .fm .toolbar .refresh {
-  align-self: stretch; min-width: 36px; padding: 0 10px; font-size: 17px; line-height: 1;
+  align-self: stretch; width: 36px; padding: 0; font-size: 17px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
   background: var(--panel2); border-color: var(--line); color: var(--fg);
 }
 .fm .toolbar .up:hover, .fm .toolbar .homedir:hover, .fm .toolbar .refresh:hover { border-color: var(--accent); color: var(--accent); }
@@ -574,7 +575,8 @@ td.state .av[data-tip]:hover::after {
 .tab.gc { box-shadow: inset 0 2px var(--gc); background: color-mix(in srgb, var(--gc) 12%, transparent); }
 .tab.gc.active { box-shadow: inset 0 2px var(--gc); background: color-mix(in srgb, var(--gc) 18%, var(--bg)); }
 .tab.dragging { opacity: .4; }
-.tab[data-sid] { cursor: grab; }
+.tab { cursor: default; }
+.ttab.dragging { opacity: .4; }
 .srvid .sgroup { align-self: flex-start; font-size: 10px; letter-spacing: .04em; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; margin-bottom: 2px; }
 .srvid .sgroup.gc { color: var(--fg); border-color: var(--gc); background: color-mix(in srgb, var(--gc) 18%, transparent); }
 .swatches { display: flex; gap: 6px; margin-top: 4px; }
@@ -623,3 +625,17 @@ td.state .av[data-tip]:hover::after {
 .navitem .dring.nav { margin-left: auto; width: auto; height: auto; background: none; display: inline; }
 .navitem .dring.nav::before { content: none; }
 .navitem .dring.nav .dring-pct { font-size: 11px; color: var(--rc); }
+
+/* tab row: "Reconnect failed" + "+" (localhost terminal) on the right */
+.tabtools { margin-left: auto; display: flex; align-items: center; gap: 6px; padding-bottom: 3px; }
+.tabtools #reconnAll { color: var(--error); border-color: color-mix(in srgb, var(--error) 40%, var(--line)); }
+.tabplus { border: 0; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; width: 28px; height: 26px; border-radius: 6px; }
+.tabplus:hover { background: var(--panel2); color: var(--fg); }
+/* settings: checkbox + number on one line */
+#settingsForm label.inl { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+#settingsForm input.num { width: 72px; display: inline-block; margin: 0; }
+.localsrv .metrics { display: none; }
+/* file manager Home / Refresh: stroke icons, larger than the text glyphs, same button size */
+.fm .toolbar .tbi { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tabplus { width: auto; display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; }
+.tabplus small { font-size: 9px; letter-spacing: .02em; }

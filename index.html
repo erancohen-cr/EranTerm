@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <nav id="tabs"><button id="homeTab" class="tab active">⌂ Home</button></nav>
+  <nav id="tabs"><button id="homeTab" class="tab active">⌂ Home</button><span class="tabtools"><button id="reconnAll" class="sm" hidden title="Reconnect every open server tab whose connection failed or dropped"></button><button id="localTab" class="tabplus" title="Open a localhost terminal">+<small>localhost</small></button></span></nav>
 
   <div id="views">
     <!-- ===== Home ===== -->
@@ -173,9 +173,9 @@
           <div class="fm">
             <div class="toolbar">
               <button class="up icon" title="Parent folder">↑</button>
-              <button class="homedir icon" title="Home folder">⌂</button>
+              <button class="homedir icon" title="Home folder"><svg class="tbi" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11 12 3l9 8 M5 9.5V21h14V9.5 M9.5 21v-6.5h5V21"/></svg></button>
               <input class="path mono grow" spellcheck="false" title="Type a path and press Enter">
-              <button class="refresh icon" title="Refresh">⟳</button>
+              <button class="refresh icon" title="Refresh"><svg class="tbi" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8 M21 3v5h-5"/></svg></button>
             </div>
             <div class="toolbar">
               <input class="fsearch search" placeholder="Search this folder…">
@@ -404,23 +404,26 @@
   <dialog id="settingsDlg">
     <form method="dialog" id="settingsForm">
       <h3>Settings</h3>
-      <label>Theme
-        <select name="theme"><option value="system">System (follow macOS)</option><option value="light">Light</option><option value="dark">Dark</option></select>
-      </label>
-      <label>Server connection default module
-        <select name="defaultPanel"><option value="files">File Manager</option><option value="term">Terminal</option><option value="logs">Logs</option><option value="stats">Metrics</option></select>
-      </label>
       <nav class="stabs">
+        <button type="button" data-tab="general">General</button>
         <button type="button" data-tab="avail">Server Availability</button>
         <button type="button" data-tab="updates">Updates</button>
         <button type="button" data-tab="logging">Logging</button>
         <button type="button" data-tab="ai">AI</button>
         <button type="button" data-tab="notify">Notifications</button>
       </nav>
+      <section class="spane" data-pane="general" hidden>
+      <label>Theme
+        <select name="theme"><option value="system">System (follow macOS)</option><option value="light">Light</option><option value="dark">Dark</option></select>
+      </label>
+      <label>Server connection default module
+        <select name="defaultPanel"><option value="files">File Manager</option><option value="term">Terminal</option><option value="logs">Logs</option><option value="stats">Metrics</option></select>
+      </label>
+      <label class="row"><input name="restoreTabs" type="checkbox"> Reopen the open server tabs when the app starts</label>
+      </section>
       <section class="spane" data-pane="avail" hidden>
-      <label class="row"><input name="availOn" type="checkbox"> Check servers in the background (SSH / desktop ports)</label>
-      <label>Check every (seconds) <input name="availSec" type="number" min="10" step="10"></label>
-      <p class="hint">A quick TCP connect to each port, 2 s timeout. Turn it off per server in its Edit dialog.</p>
+      <label class="row inl"><input name="availOn" type="checkbox"> Check servers in the background, every <input name="availSec" type="number" min="10" step="10" class="num"> s</label>
+      <p class="hint">A quick TCP connect to each SSH / desktop port, 2 s timeout. Turn it off per server in its Edit dialog.</p>
       </section>
       <section class="spane" data-pane="updates" hidden>
       <label class="row"><input name="autoUpdate" type="checkbox"> Update automatically when a new release is published</label>

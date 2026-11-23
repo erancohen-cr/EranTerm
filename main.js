@@ -12,7 +12,7 @@ const util = require('node:util');
 const { METRICS_CMD, parseMetrics, TOP_CMD, parseTop } = require('./metrics');
 const { killCmd, DROP_CACHES_CMD, SCAN_CMD, parseScan, cleanCmd } = require('./maint');
 const winlogs = require('./winlogs');
-const { shq, buildRdp, remoteDir, AI_PROVIDERS, validModel, normModel, buildAiRequest, parseAiResponse, buildModelsRequest, parseModels, hostKeyDecision } = require('./util');
+const { shq, buildRdp, remoteDir, AI_PROVIDERS, validModel, normModel, parseCliModels, buildAiRequest, parseAiResponse, buildModelsRequest, parseModels, hostKeyDecision } = require('./util');
 const { runDeployment, toSteps } = require('./deploy');
 
 const rpath = path.posix;
@@ -328,7 +328,7 @@ ipcMain.handle('settings:get', () => ({
   aiProvider: aiProvider(),
   providers: Object.fromEntries(Object.entries(AI_PROVIDERS).map(([id, d]) => [id, {
     label: d.label, models: d.models, env: d.env, model: aiConf(id).model,
-    hasKey: !!aiKey(id), fromEnv: !!process.env[d.env],
+    hasKey: !!aiKey(id), fromEnv: !!process.env[d.env], cli: !!d.cli,
   }])),
 }));
 // { provider, key? (blank = keep, null = remove), model }
@@ -429,12 +429,63 @@ const openConn = serverId => new Promise((resolve, reject) => {
   });
   conn.connect(cfg);
 });
-ipcMain.handle('ssh:connect', (_e, serverId) => openConn(serverId));
+// ---------- localhost terminal (the "+" tab) ----------
+// A pty without native modules: macOS ships perl with IO::Pty. The helper relays stdin/stdout to a login
+// shell and reads "rows cols\n" resize lines on fd 3.
+// ponytail: no Windows (no pty there without ConPTY); node-pty covers Windows if that's ever needed.
+const LOCAL = 'local';
+const PTY_PL = String.raw`
+use strict; use IO::Pty; use POSIX ();
+my ($rows, $cols, $sh, $cwd) = @ARGV;
+my $pty = IO::Pty->new or die "pty: $!";
+my $setsz = sub { ioctl($pty, IO::Tty::Constant::TIOCSWINSZ(), pack('S4', $_[0], $_[1], 0, 0)) };
+$setsz->($rows, $cols);
+my $pid = fork; die "fork: $!" unless defined $pid;
+if (!$pid) {
+  $pty->make_slave_controlling_terminal; my $s = $pty->slave; close $pty;
+  open STDIN, '<&', $s; open STDOUT, '>&', $s; open STDERR, '>&', $s; close $s;
+  chdir $cwd; $ENV{TERM} = 'xterm-256color';
+  exec { $sh } '-' . ($sh =~ s{.*/}{}r) or POSIX::_exit(127);
+}
+$pty->close_slave; open my $ctl, '<&=', 3 or die "fd3: $!";
+my ($buf, $cbuf) = ('', '');
+while (1) {
+  my $rin = ''; vec($rin, fileno($pty), 1) = 1; vec($rin, 0, 1) = 1; vec($rin, 3, 1) = 1;
+  next if select(my $r = $rin, undef, undef, undef) < 0;
+  if (vec($r, fileno($pty), 1)) { my $n = sysread($pty, $buf, 65536); last unless $n; syswrite(STDOUT, $buf); }
+  if (vec($r, 0, 1)) { my $n = sysread(STDIN, $buf, 65536); if (!$n) { kill 'HUP', $pid; last } syswrite($pty, $buf); }
+  if (vec($r, 3, 1)) { sysread($ctl, $cbuf, 64, length $cbuf) or last; $setsz->($1, $2) while $cbuf =~ s/^(\d+) (\d+)\n//; }
+}
+kill 'HUP', $pid; waitpid $pid, 0;`;
+function localShell(cols, rows, cwd) {
+  if (process.platform === 'win32') throw new Error('The localhost terminal is available on macOS and Linux.');
+  const sh = process.env.SHELL || '/bin/zsh';
+  const dir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
+  const p = spawn('perl', ['-e', PTY_PL, String(rows || 24), String(cols || 80), sh, dir], { stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
+  p.stdin.on('error', () => {}); p.stdio[3].on('error', () => {});
+  p.stderr.on('data', d => console.warn(`localhost terminal: ${String(d).trim()}`));
+  return {
+    proc: p,
+    write: d => p.stdin.writable && p.stdin.write(d),
+    setWindow: (r, c) => p.stdio[3].writable && p.stdio[3].write(`${r | 0} ${c | 0}\n`),
+    close: () => p.stdin.end(),
+  };
+}
+
+ipcMain.handle('ssh:connect', (_e, serverId) => (serverId === LOCAL ? LOCAL : openConn(serverId)));
 ipcMain.handle('ssh:os', (_e, connId) => connOs(connId)); // 'windows' | 'macos' | 'linux' | 'unix' | ''
 
 ipcMain.on('ssh:disconnect', (_e, connId) => conns.get(connId)?.conn.end());
 
 ipcMain.handle('ssh:shell', async (_e, connId, cols, rows, cwd) => {
+  if (connId === LOCAL) {
+    const sh = localShell(cols, rows, cwd), id = crypto.randomUUID();
+    shells.set(id, sh);
+    sh.proc.stdout.on('data', d => send('ssh:data', id, d));
+    sh.proc.on('close', () => { shells.delete(id); send('ssh:closed', id); });
+    sh.proc.on('error', err => send('ssh:data', id, `\r\n${err.message}\r\n`));
+    return id;
+  }
   const stream = await p(cb => getConn(connId).conn.shell({ term: 'xterm-256color', cols, rows }, cb));
   const id = crypto.randomUUID();
   shells.set(id, stream);
@@ -1010,11 +1061,53 @@ async function aiFetch(provider, req) {
   if (!res.ok) throw new Error(`${name}: ${errMsg || `API error ${res.status}`}`);
   return body;
 }
+// ---- Cursor: the Cursor CLI in print mode (no public chat API). The key goes in the env, never argv.
+// GUI apps on macOS get a short PATH, so the CLI's install folders are checked first.
+// ponytail: macOS/Linux only (the CLI is a .cmd on Windows, which needs a shell to spawn).
+const CURSOR_BINS = ['.local/bin/cursor-agent', '.local/bin/agent'].map(b => path.join(os.homedir(), b))
+  .concat(['/opt/homebrew/bin/cursor-agent', '/usr/local/bin/cursor-agent']);
+const cursorBin = () => CURSOR_BINS.find(b => fs.existsSync(b)) || 'cursor-agent';
+const CURSOR_AUTH = /api.?key|auth|log ?in|unauthori[sz]ed|not logged/i;
+function cursorRun(args, key, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env, ...(key ? { CURSOR_API_KEY: key } : {}) };
+    const p = spawn(cursorBin(), args, { env, cwd: os.tmpdir(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    const timer = setTimeout(() => { p.kill(); reject(new Error(`Cursor: no answer after ${timeoutMs / 1000} s.`)); }, timeoutMs);
+    p.stdout.on('data', d => (out += d));
+    p.stderr.on('data', d => (err += d));
+    p.on('error', e => {
+      clearTimeout(timer);
+      reject(new Error(e.code === 'ENOENT'
+        ? 'Cursor CLI not found. Install it with: curl https://cursor.com/install -fsS | bash — then log in (cursor-agent login) or add a Cursor API key.'
+        : `Cursor: ${e.message}`));
+    });
+    p.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) return resolve(out);
+      const msg = (err || out).trim().split('\n').slice(-3).join(' ').slice(0, 300) || `exit code ${code}`;
+      reject(new Error(CURSOR_AUTH.test(msg) ? `NO_API_KEY: Cursor: ${msg}` : `Cursor: ${msg}`));
+    });
+  });
+}
+const cursorAsk = (key, model, system, content) =>
+  cursorRun(['-p', '--output-format', 'text', '--model', model, `${system}\n\n${content}`], key);
+const cursorModels = async key => {
+  const ids = parseCliModels(await cursorRun(['models'], key, 30000).catch(() => cursorRun(['--list-models'], key, 30000)));
+  if (!ids.length) throw new Error('Cursor CLI listed no models (type a model id, or use "auto").');
+  return ids;
+};
+
 // override: { provider, key, model } from the Settings dialog (Test before saving); otherwise saved settings.
 async function callAI(system, content, maxTokens, override = {}) {
   const provider = override.provider || aiProvider();
   const name = AI_PROVIDERS[provider].label;
   const key = override.key || aiKey(provider);
+  if (AI_PROVIDERS[provider].cli) {
+    const text = (await cursorAsk(key, normModel(override.model) || aiConf(provider).model, system, content)).trim();
+    if (!text) throw new Error(`${name} returned an empty answer (try again, or another model).`);
+    return text;
+  }
   if (!key) throw new Error(`NO_API_KEY: AI is not configured. Add a ${name} API key in Settings → AI configuration.`);
   const model = normModel(override.model) || aiConf(provider).model;
   const body = await aiFetch(provider, buildAiRequest(provider, { key, model, system, content, maxTokens }));
@@ -1027,6 +1120,7 @@ async function callAI(system, content, maxTokens, override = {}) {
 ipcMain.handle('ai:models', async (_e, { provider, key }) => {
   if (!AI_PROVIDERS[provider]) throw new Error('Unknown AI provider');
   const k = String(key || '').trim() || aiKey(provider);
+  if (AI_PROVIDERS[provider].cli) return cursorModels(k);
   if (!k) throw new Error(`NO_API_KEY: Enter a ${AI_PROVIDERS[provider].label} API key first.`);
   return parseModels(provider, await aiFetch(provider, buildModelsRequest(provider, k)));
 });
@@ -1060,7 +1154,7 @@ ipcMain.handle('ai:analyze', async (_e, connId, { kind, question, text, source }
 });
 
 ipcMain.handle('ai:suggest', async (_e, connId, request) => {
-  const uname = conns.get(connId)?.uname || 'unknown Linux';
+  const uname = conns.get(connId)?.uname || (connId === LOCAL ? `${os.type()} ${os.release()} ${os.arch()} (this computer)` : 'unknown Linux');
   const text = await callAI(SYSTEM, `Server: ${uname}\nRequest: ${request}`, 1024);
   const json = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
   if (typeof json.command !== 'string' || !json.command.trim()) throw new Error('Model returned no command');

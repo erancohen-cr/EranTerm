@@ -131,3 +131,9 @@ test('remoteDir', () => {
   assert.strictEqual(sh(remoteDir('/opt/$(x)')), '/opt/$(x)');
   assert.strictEqual(sh(remoteDir('')), '/home/me');
 });
+
+test('parseCliModels reads cursor-agent model lists', () => {
+  const { parseCliModels } = require('./util');
+  const out = '\x1b[1mAvailable models\x1b[0m\n\n  * auto (current)\n  - gpt-5   GPT-5\n  sonnet-4.5 - Claude\n\nTip: use --model <id>\n';
+  assert.deepStrictEqual(parseCliModels(out), ['auto', 'gpt-5', 'sonnet-4.5']);
+});

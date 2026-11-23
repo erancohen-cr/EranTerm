@@ -83,7 +83,9 @@ document.addEventListener('drop', e => e.preventDefault());
 const views = new Map(); // serverId -> server view
 let deploys; // home Deployments panel, built on first visit
 
+let shownId = 'home';
 function show(id) {
+  shownId = id;
   $('#home').hidden = id !== 'home';
   $('#homeTab').classList.toggle('active', id === 'home');
   for (const [sid, v] of views) {
@@ -108,22 +110,58 @@ function paintTabs() {
   }
 }
 
-// Drag server tabs to reorder them (Home stays first).
-let dragTab = null;
-$('#tabs').addEventListener('dragstart', e => {
-  dragTab = e.target.closest?.('.tab[data-sid]');
-  if (!dragTab) return e.preventDefault();
-  e.dataTransfer.effectAllowed = 'move';
-  dragTab.classList.add('dragging');
-});
-$('#tabs').addEventListener('dragover', e => {
-  const over = e.target.closest?.('.tab[data-sid]');
-  if (!dragTab || !over || over === dragTab) return;
-  e.preventDefault();
-  const r = over.getBoundingClientRect();
-  over[e.clientX < r.left + r.width / 2 ? 'before' : 'after'](dragTab);
-});
-$('#tabs').addEventListener('dragend', () => { dragTab?.classList.remove('dragging'); dragTab = null; });
+// Drag tabs (items matching sel, marked draggable) to reorder them inside box.
+function dragReorder(box, sel, done) {
+  let drag = null;
+  box.addEventListener('dragstart', e => {
+    drag = e.target.closest?.(sel);
+    if (!drag || drag.parentElement !== box) { drag = null; return; }
+    e.dataTransfer.effectAllowed = 'move';
+    drag.classList.add('dragging');
+  });
+  box.addEventListener('dragover', e => {
+    const over = e.target.closest?.(sel);
+    if (!drag || !over || over === drag || over.parentElement !== box) return;
+    e.preventDefault();
+    const r = over.getBoundingClientRect();
+    over[e.clientX < r.left + r.width / 2 ? 'before' : 'after'](drag);
+  });
+  box.addEventListener('dragend', () => { if (!drag) return; drag.classList.remove('dragging'); drag = null; done?.(); });
+}
+// Server tabs (Home stays first).
+dragReorder($('#tabs'), '.tab[data-sid]', () => saveTabs());
+
+// Open server tabs (in tab order) are remembered; Settings → General → reopen them at startup.
+const tabIds = () => [...$('#tabs').querySelectorAll('.tab[data-sid]')].map(t => t.dataset.sid);
+const saveTabs = () => { try { localStorage.setItem('openTabs', JSON.stringify(tabIds())); } catch { /* not remembered */ } };
+const restoreTabsOn = () => { try { return localStorage.getItem('restoreTabs') === 'on'; } catch { return false; } };
+
+// "+" opens a terminal on this computer as a server tab (Terminal only: no SSH, so no files/logs/metrics).
+const LOCAL = 'local';
+const LOCAL_SERVER = { id: LOCAL, name: 'localhost', host: 'localhost', local: true };
+$('#localTab').onclick = () => openServer(LOCAL_SERVER);
+
+// Tabs whose connection failed or dropped; one button reconnects them all.
+function paintReconnect() {
+  const n = [...views.values()].filter(v => v.failed).length;
+  $('#reconnAll').hidden = !n;
+  $('#reconnAll').textContent = `⟳ Reconnect failed (${n})`;
+}
+$('#reconnAll').onclick = () => { for (const [sid, v] of views) if (v.failed) reconnect(sid); };
+// Fresh page in the same tab position; the tab on screen stays on screen.
+function reconnect(sid) {
+  const v = views.get(sid);
+  if (!v) return;
+  const s = servers.find(x => x.id === sid) || v.server, next = v.tabEl.nextSibling, cur = shownId;
+  v.dispose();
+  views.delete(sid);
+  const p = openServer(s); // adds the tab and shows it synchronously, then connects
+  next.before(views.get(sid).tabEl);
+  show(cur);
+  saveTabs();
+  paintReconnect();
+  return p;
+}
 
 // ================= home: servers, groups, users =================
 let servers = [], users = [], savedGroups = [], groupColors = {};
@@ -566,7 +604,9 @@ function showProvider(p) {
   const d = aiSettings.providers[p];
   $('#keyLabel').textContent = `${d.label} API key`;
   $('#keyStatus').textContent = d.fromEnv ? `Using ${d.env} from the environment (it overrides a saved key).`
-    : d.hasKey ? 'A key is saved for this provider (encrypted in Keychain).' : 'No key for this provider — Ask AI is disabled until you add one.';
+    : d.hasKey ? 'A key is saved for this provider (encrypted in Keychain).'
+    : d.cli ? 'Runs the Cursor CLI (cursor-agent) on this Mac. Key optional: without one it uses your `cursor-agent login`.'
+    : 'No key for this provider — Ask AI is disabled until you add one.';
   f.clearKey.parentElement.hidden = !d.hasKey || d.fromEnv;
   f.clearKey.checked = false;
   f.apiKey.value = '';
@@ -586,12 +626,13 @@ async function openSettings(focusKey = false) {
   f.elements.availSec.value = aiSettings.avail.intervalSec;
   f.elements.notify.checked = notifyOn();
   f.elements.defaultPanel.value = defaultPanel();
+  f.elements.restoreTabs.checked = restoreTabsOn();
   $('#updHint').textContent = `You have version ${aiSettings.version}. Checks at startup and every 6 hours. Help → Check for Updates… checks now.`;
   f.elements.aiProvider.replaceChildren(...Object.entries(aiSettings.providers)
     .map(([value, d]) => el('option', { value, textContent: d.label + (d.hasKey ? '  ✓' : '') })));
   f.elements.aiProvider.value = aiSettings.aiProvider;
   showProvider(aiSettings.aiProvider);
-  settingsTab(focusKey ? 'ai' : 'avail');
+  settingsTab(focusKey ? 'ai' : 'general');
   $('#settingsDlg').returnValue = '';
   $('#settingsDlg').showModal();
   if (focusKey) f.elements.apiKey.focus();
@@ -676,7 +717,7 @@ $('#settingsForm').addEventListener('submit', async e => {
       await api.settings.setAvail({ on: f.availOn.checked, intervalSec: f.availSec.value });
     }
     if (f.notify.checked && Notification.permission === 'default') Notification.requestPermission();
-    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); } catch { /* ignore */ }
+    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); localStorage.setItem('restoreTabs', f.restoreTabs.checked ? 'on' : 'off'); } catch { /* ignore */ }
     $('#settingsDlg').close('save');
     toast(`Settings saved. AI: ${aiSettings.providers[f.aiProvider.value].label}`);
   } catch (err) {
@@ -878,6 +919,8 @@ function closeServer(serverId) {
   if (!v) return;
   v.dispose();
   views.delete(serverId);
+  paintReconnect();
+  saveTabs();
   show('home');
 }
 
@@ -890,15 +933,20 @@ async function openServer(s) {
   const tabEl = el('button', { className: 'tab', draggable: true, onclick: () => show(s.id) },
     el('span', { textContent: '▤ ' + s.name }),
     el('span', { className: 'x', textContent: '×', title: 'Disconnect', onclick: e => { e.stopPropagation(); closeServer(s.id); } }));
-  $('#tabs').append(tabEl);
+  $('#tabs .tabtools').before(tabEl);
 
   tabEl.dataset.sid = s.id;
-  const v = { root, tabEl, connId: null, panel: 'files' };
+  const v = { root, tabEl, connId: null, panel: 'files', server: s, failed: false };
   views.set(s.id, v);
+  saveTabs();
 
   q('.sname').textContent = s.name;
   paintTabs();
-  q('.saddr').textContent = typeOf(s) === 'rdp' // the server page is the SSH side of an RDP entry
+  if (s.local) { // only the Terminal module works without SSH
+    root.querySelectorAll('.srvbody > .side .navitem').forEach(b => (b.hidden = b.dataset.panel !== 'term'));
+    root.classList.add('localsrv');
+  }
+  q('.saddr').textContent = s.local ? 'This computer (local shell)' : typeOf(s) === 'rdp' // the server page is the SSH side of an RDP entry
     ? `${s.domain ? s.domain + '\\' : ''}${s.username}@${s.host}:${s.sshPort || 22} (SSH)`
     : `${s.username}@${s.host}:${s.port}`;
   q('.sdetails').textContent = q('.sdetails').title = s.details || '';
@@ -934,7 +982,7 @@ async function openServer(s) {
     const sess = { host, title: `Session ${++sessNo}` };
     const titleEl = el('span', { className: 'ttitle', textContent: sess.title, title: 'Double-click to rename' });
     titleEl.ondblclick = e => { e.stopPropagation(); renameSession(sess, titleEl); };
-    sess.tabEl = el('div', { className: 'ttab', onclick: () => activateSession(sess) },
+    sess.tabEl = el('div', { className: 'ttab', draggable: true, onclick: () => activateSession(sess) },
       el('span', { className: 'tdot' }), titleEl,
       iconBtn('×', 'Close session', () => closeSession(sess), 'x'));
     q('.ttablist').append(sess.tabEl);
@@ -992,6 +1040,11 @@ async function openServer(s) {
   const openInTerminal = dir => runInTerminal(`cd ${shq(dir)}\r`);
 
   q('.tnew').onclick = () => newSession();
+  // Drag terminal session tabs to reorder; the list follows the new order.
+  dragReorder(q('.ttablist'), '.ttab', () => {
+    const order = [...q('.ttablist').children];
+    sessions.sort((a, b) => order.indexOf(a.tabEl) - order.indexOf(b.tabEl));
+  });
 
   // ---- scripts side panel ----
   let scripts = [], dragId = null;
@@ -1829,6 +1882,8 @@ async function openServer(s) {
     v.connId = null;
     stopTail();
     setStatus('DISCONNECTED — click to reconnect', 'err');
+    v.failed = true;
+    paintReconnect();
     if (msg) toast(`${s.name}: ${msg}`, true);
   };
   v.dispose = () => {
@@ -1842,24 +1897,23 @@ async function openServer(s) {
     root.remove();
     tabEl.remove();
   };
-  q('.status').onclick = () => {
-    if (v.connId) return;
-    closeServer(s.id);
-    openServer(servers.find(x => x.id === s.id) || s);
-  };
+  q('.status').onclick = () => { if (!v.connId) reconnect(s.id); };
 
-  pickPanel(defaultPanel());
+  pickPanel(s.local ? 'term' : defaultPanel());
   show(s.id);
   try {
     v.connId = await api.ssh.connect(s.id);
   } catch (e) {
     setStatus('FAILED — click to retry', 'err');
+    v.failed = true;
+    paintReconnect();
     toast(`${s.name}: ${cleanErr(e)}`, true);
     return;
   }
   if (!views.has(s.id)) return api.ssh.disconnect(v.connId); // tab closed while connecting
   setStatus('● CONNECTED', 'on');
   pickPanel(v.panel);
+  if (s.local) v.pollMetrics = () => {}; // no metrics without SSH
   v.pollMetrics();
 }
 
@@ -1868,7 +1922,16 @@ setInterval(() => {
   for (const v of views.values()) if (v.connId && (!v.root.hidden || v.hasAlerts?.())) v.pollMetrics();
 }, 5000);
 
-refreshServers();
+refreshServers().then(() => {
+  if (!restoreTabsOn()) return;
+  let ids = [];
+  try { ids = JSON.parse(localStorage.getItem('openTabs')) || []; } catch { /* nothing to reopen */ }
+  for (const sid of ids) {
+    const s = sid === LOCAL ? LOCAL_SERVER : servers.find(x => x.id === sid);
+    if (s) openServer(s);
+  }
+  show('home');
+});
 
 // ================= foldable side menus (one state for all menus) =================
 const setFolded = on => {

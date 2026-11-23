@@ -49,8 +49,9 @@
     <li>Click <b>＋ New connection</b> on the Home page.</li>
     <li>Choose the type (<b>SSH</b> or <b>RDP</b>), then enter the host, port, and login: a username with a password or private key, or a saved <a href="#users">User</a>.</li>
     <li>Optionally set a group, tags, details, and mark it as a favorite. Then click <b>Save</b>.</li>
-    <li>Click <b>▶ SSH</b> on the server. Each connection opens in its own tab at the top of the window, on the module chosen in <a href="#settings">Settings</a> (File Manager by default). <b>⌂ Home</b> always takes you back. Drag tabs to reorder them. A server's group is shown above its name at the top of its page.</li>
+    <li>Click <b>▶ SSH</b> on the server. Each connection opens in its own tab at the top of the window, on the module chosen in <a href="#settings">Settings</a> (File Manager by default). <b>⌂ Home</b> always takes you back. Drag tabs to reorder them. If a connection fails or drops, <b>⟳ Reconnect failed</b> appears at the right of the tab row and reconnects all of them in place. A server's group is shown above its name at the top of its page.</li>
   </ol>
+  <p>The <b>+</b> at the right of the tab row opens a <b>localhost</b> tab: a terminal on this computer (your login shell), with terminal sessions, scripts and AI like any server. It has no File Manager, Logs or Metrics. Available on macOS and Linux.</p>
   <p class="note">The first time you connect, EranTerm remembers the server's host key. If that key changes later, EranTerm accepts the new one and warns you, so you can check it was expected (for example after a reinstall).</p>
 
   <h2 id="home">Home: servers &amp; groups</h2>
@@ -129,19 +130,22 @@
   <ul>
     <li>In the <b>Terminal</b>, describe what you want, and the AI suggests a command. Nothing runs until you approve it.</li>
     <li><b>Ask AI</b> in Terminal or Logs analyzes what's on screen, or the log lines that are currently shown.</li>
-    <li>Set it up in <b>Settings → AI</b>: choose a provider (Anthropic, OpenAI, or Gemini), paste an API key, and pick a model. <b>Test</b> checks the key without saving it.</li>
+    <li>Set it up in <b>Settings → AI</b>: choose a provider (Anthropic, OpenAI, Gemini or Cursor), paste an API key, and pick a model (<b>Load models</b> asks the provider for its current list). <b>Test</b> checks the key without saving it.</li>
+    <li><b>Cursor</b> runs the Cursor CLI on this computer (<code>cursor-agent</code>; install with <code>curl https://cursor.com/install -fsS | bash</code>). The API key is optional: without one it uses your <code>cursor-agent login</code>. Model <code>auto</code> lets Cursor choose.</li>
     <li>Text is sent to the provider only when you click Ask AI or request a command.</li>
   </ul>
 
   <h2 id="settings">Settings &amp; updates</h2>
+  <p>Settings is split into tabs.</p>
+  <h3>General</h3>
   <ul>
     <li><b>Theme</b>: System, Light, or Dark.</li>
     <li><b>Server connection default module</b>: the module a server opens on when you connect: File Manager (default), Terminal, Logs or Metrics.</li>
-    <li>The rest is split into tabs:</li>
+    <li><b>Reopen the open server tabs when the app starts</b>: the tabs open when you quit (in their order, including localhost) reconnect at the next start. Off by default.</li>
   </ul>
   <h3>Server Availability</h3>
   <ul>
-    <li>Turn background checks on or off for all servers, and set how often they run (seconds, default 60).</li>
+    <li>Turn background checks on or off for all servers, and set how often they run (seconds, default 60), on one line.</li>
   </ul>
   <h3>Updates</h3>
   <ul>
