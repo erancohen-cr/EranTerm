@@ -383,8 +383,19 @@ body.folded .navitem .gedit { display: none; }
 .linkbtn { background: none; border: 0; color: var(--muted); font-size: 11px; padding: 2px; align-self: flex-start; }
 .linkbtn:hover { color: var(--accent); }
 #scriptDlg .sc-tags { margin: -4px 0 8px; }
-.actions .desk { min-width: 132px; display: inline-block; }
+/* SSH (Connect) and Desktop buttons: one fixed width, label left, protocol status right */
+.actions .desk, .actions .conn { width: 96px; min-width: 0; padding: 5px 7px; display: inline-flex; align-items: center; justify-content: space-between; gap: 4px; vertical-align: middle; }
 .actions .desk.ph { visibility: hidden; }
+.actions .blbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.av { flex: none; display: inline-block; }
+.av { width: 8px; height: 8px; border-radius: 50%; background: var(--line2); }
+.av.up { background: var(--accent); box-shadow: 0 0 5px var(--accent); }
+.av.down { background: var(--error); }
+.actions .av.none { visibility: hidden; } /* buttons: no dot until checked */
+.grid .state { width: 1%; text-align: center; padding-right: 0; }
+td.state .av { width: 10px; height: 10px; vertical-align: middle; }
+.dfilter { display: flex; gap: 6px; margin-bottom: 8px; }
+.dfilter input { flex: 1; }
 
 /* ---------- metrics tab (System Resources) ---------- */
 .panel.stats { overflow: auto; }
@@ -475,7 +486,11 @@ dialog .dlgsec { margin: 14px 0 6px; font-size: 12px; letter-spacing: .06em; tex
 #aiMsg.ok { color: var(--accent); }
 #aiMsg.warn { color: var(--warn); }
 #aiMsg.error { color: var(--error); }
-#settingsDlg { width: 520px; }
+#settingsDlg { width: 560px; }
+.stabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 12px 0 10px; }
+.stabs button { border: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); padding: 6px 10px; }
+.stabs button.on { background: var(--panel2); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+.spane { min-height: 230px; }
 
 /* ---------- home: Alerts column ---------- */
 .alertcell { position: relative; white-space: nowrap; }
@@ -497,7 +512,8 @@ tr.srow.alerting td:first-child { box-shadow: inset 3px 0 var(--error); }
 
 /* file manager: nav buttons as tall as the path box */
 .fm .toolbar .up, .fm .toolbar .homedir, .fm .toolbar .refresh {
-  align-self: stretch; min-width: 36px; padding: 0 10px; font-size: 17px; line-height: 1;
+  align-self: stretch; width: 36px; padding: 0; font-size: 17px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
   background: var(--panel2); border-color: var(--line); color: var(--fg);
 }
 .fm .toolbar .up:hover, .fm .toolbar .homedir:hover, .fm .toolbar .refresh:hover { border-color: var(--accent); color: var(--accent); }
@@ -542,3 +558,84 @@ tr.srow.alerting td:first-child { box-shadow: inset 3px 0 var(--error); }
 /* file-row actions: same box for every button; text glyphs enlarged to match the 🗑 emoji */
 .grid .actions button.icon { width: 30px; height: 28px; padding: 0; line-height: 1; vertical-align: middle; }
 .grid .actions button.icon:not(.danger) { font-size: 17px; }
+
+/* Instant tooltip for the State dot (the native title tooltip has a fixed ~2 s delay) */
+td.state { position: relative; }
+td.state .av[data-tip]:hover::after {
+  content: attr(data-tip); position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 6px;
+  z-index: 5; white-space: nowrap; pointer-events: none;
+  background: var(--panel2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 8px; font-size: 11px; font-weight: 400; box-shadow: 0 4px 14px #0006;
+}
+
+/* Group colors (gentle palette): group rows on Home, server tabs, server page header chip */
+.grprow.gc td { background: color-mix(in srgb, var(--gc) 14%, var(--panel)); box-shadow: inset 3px 0 var(--gc); }
+.grprow.gc:hover td { background: color-mix(in srgb, var(--gc) 22%, var(--panel)); }
+.grprow.gc b { color: var(--gc); }
+.tab.gc { box-shadow: inset 0 2px var(--gc); background: color-mix(in srgb, var(--gc) 12%, transparent); }
+.tab.gc.active { box-shadow: inset 0 2px var(--gc); background: color-mix(in srgb, var(--gc) 18%, var(--bg)); }
+.tab.dragging { opacity: .4; }
+.tab { cursor: default; }
+.ttab.dragging { opacity: .4; }
+.srvid .sgroup { align-self: flex-start; font-size: 10px; letter-spacing: .04em; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; margin-bottom: 2px; }
+.srvid .sgroup.gc { color: var(--fg); border-color: var(--gc); background: color-mix(in srgb, var(--gc) 18%, transparent); }
+.swatches { display: flex; gap: 6px; margin-top: 4px; }
+.swatches .sw { width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid transparent; }
+.swatches .sw.none { background: transparent; border: 1px dashed var(--line2); }
+.swatches .sw.on { border: 2px solid var(--fg); }
+.navitem.gc i { color: var(--gc); }
+
+/* ---------- deployment builder ---------- */
+.deditor { --dc-command: #8fb3d9; --dc-check: #8fc9a8; --dc-files: #d9c48f; }
+.dflow { display: flex; align-items: center; gap: 4px; overflow-x: auto; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); flex: none; }
+.dfnode { --c: var(--line2); flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 96px; max-width: 170px; padding: 6px 10px;
+  border: 1px solid var(--c); border-radius: 8px; background: color-mix(in srgb, var(--c) 14%, var(--bg)); cursor: pointer; }
+.dfnode b { font-size: 12px; white-space: nowrap; }
+.dfnode small { font-size: 10px; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dfnode .dficon { font-size: 13px; color: var(--c); }
+.dfnode.servers, .dfnode.done { --c: var(--accent); cursor: default; }
+.dfnode.command { --c: var(--dc-command); } .dfnode.check { --c: var(--dc-check); } .dfnode.files { --c: var(--dc-files); }
+.dfnode.skip { border-style: dashed; opacity: .55; }
+.dfarrow { align-self: center; color: var(--muted); flex: none; }
+/* vertical pipeline: a line runs through the step numbers */
+.dpipe { display: flex; flex-direction: column; gap: 12px; position: relative; padding-left: 18px; }
+.dpipe::before { content: ''; position: absolute; left: 6px; top: 14px; bottom: 30px; width: 2px; background: var(--line); border-radius: 1px; }
+.dscard { position: relative; border-left: 3px solid var(--c, var(--line)); }
+.dscard::before { content: ''; position: absolute; left: -17px; top: 16px; width: 10px; height: 10px; border-radius: 50%; background: var(--c); border: 2px solid var(--bg); }
+.dscard.command { --c: var(--dc-command); } .dscard.check { --c: var(--dc-check); } .dscard.files { --c: var(--dc-files); }
+.dscard .dnum { background: color-mix(in srgb, var(--c) 22%, transparent); color: color-mix(in srgb, var(--c) 55%, var(--fg)); }
+.dscard header b { color: color-mix(in srgb, var(--c) 55%, var(--fg)); }
+.dscard.skip { opacity: .8; }
+.dscard .icon.ph { visibility: hidden; }
+.dstepadd { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 10px 12px; border: 1px dashed var(--line2); border-radius: 8px; }
+.dsteps { overflow-x: auto; }
+
+/* Deployment list: progress ring next to the name (conic-gradient, --p = 0..100) */
+.dltitle { display: flex; align-items: center; gap: 8px; }
+.dltitle b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dring { --p: 0; --rc: #4fb3ff; flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center;
+  background: conic-gradient(var(--rc) calc(var(--p) * 1%), var(--line) 0); }
+.dring::before { content: ''; grid-area: 1 / 1; width: 26px; height: 26px; border-radius: 50%; background: var(--panel); }
+.dl li:hover .dring::before { background: var(--panel2); }
+.dring-pct { grid-area: 1 / 1; z-index: 1; font-size: 9px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.dring.success { --rc: var(--accent); } .dring.warning { --rc: var(--warn); } .dring.failed { --rc: var(--error); }
+.dl li.running b::after { content: none; } /* the ring replaces the pulsing dot */
+.dl li.active .dring::before { background: linear-gradient(var(--accent-dim), var(--accent-dim)), var(--panel); }
+/* main side menu: percentage only (no ring), colored by state */
+.navitem .dring.nav { margin-left: auto; width: auto; height: auto; background: none; display: inline; }
+.navitem .dring.nav::before { content: none; }
+.navitem .dring.nav .dring-pct { font-size: 11px; color: var(--rc); }
+
+/* tab row: "Reconnect failed" + "+" (localhost terminal) on the right */
+.tabtools { margin-left: auto; display: flex; align-items: center; gap: 6px; padding-bottom: 3px; }
+.tabtools #reconnAll { color: var(--error); border-color: color-mix(in srgb, var(--error) 40%, var(--line)); }
+.tabplus { border: 0; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; width: 28px; height: 26px; border-radius: 6px; }
+.tabplus:hover { background: var(--panel2); color: var(--fg); }
+/* settings: checkbox + number on one line */
+#settingsForm label.inl { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+#settingsForm input.num { width: 72px; display: inline-block; margin: 0; }
+.localsrv .metrics { display: none; }
+/* file manager Home / Refresh: stroke icons, larger than the text glyphs, same button size */
+.fm .toolbar .tbi { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tabplus { width: auto; display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; }
+.tabplus small { font-size: 9px; letter-spacing: .02em; }

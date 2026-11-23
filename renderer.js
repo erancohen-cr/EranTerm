@@ -83,7 +83,9 @@ document.addEventListener('drop', e => e.preventDefault());
 const views = new Map(); // serverId -> server view
 let deploys; // home Deployments panel, built on first visit
 
+let shownId = 'home';
 function show(id) {
+  shownId = id;
   $('#home').hidden = id !== 'home';
   $('#homeTab').classList.toggle('active', id === 'home');
   for (const [sid, v] of views) {
@@ -95,8 +97,74 @@ function show(id) {
 }
 $('#homeTab').onclick = () => show('home');
 
+// Server tab + page header follow the server's group (name chip, gentle color). Re-run when groups change.
+function paintTabs() {
+  for (const [sid, v] of views) {
+    const g = servers.find(x => x.id === sid)?.group || '';
+    tintGroup(v.tabEl, g);
+    v.tabEl.title = g ? `Group: ${g}` : '';
+    const chip = v.root.querySelector('.sgroup');
+    chip.textContent = g ? `▣ ${g}` : '';
+    chip.hidden = !g;
+    tintGroup(chip, g);
+  }
+}
+
+// Drag tabs (items matching sel, marked draggable) to reorder them inside box.
+function dragReorder(box, sel, done) {
+  let drag = null;
+  box.addEventListener('dragstart', e => {
+    drag = e.target.closest?.(sel);
+    if (!drag || drag.parentElement !== box) { drag = null; return; }
+    e.dataTransfer.effectAllowed = 'move';
+    drag.classList.add('dragging');
+  });
+  box.addEventListener('dragover', e => {
+    const over = e.target.closest?.(sel);
+    if (!drag || !over || over === drag || over.parentElement !== box) return;
+    e.preventDefault();
+    const r = over.getBoundingClientRect();
+    over[e.clientX < r.left + r.width / 2 ? 'before' : 'after'](drag);
+  });
+  box.addEventListener('dragend', () => { if (!drag) return; drag.classList.remove('dragging'); drag = null; done?.(); });
+}
+// Server tabs (Home stays first).
+dragReorder($('#tabs'), '.tab[data-sid]', () => saveTabs());
+
+// Open server tabs (in tab order) are remembered; Settings → General → reopen them at startup.
+const tabIds = () => [...$('#tabs').querySelectorAll('.tab[data-sid]')].map(t => t.dataset.sid);
+const saveTabs = () => { try { localStorage.setItem('openTabs', JSON.stringify(tabIds())); } catch { /* not remembered */ } };
+const restoreTabsOn = () => { try { return localStorage.getItem('restoreTabs') === 'on'; } catch { return false; } };
+
+// "+" opens a terminal on this computer as a server tab (Terminal only: no SSH, so no files/logs/metrics).
+const LOCAL = 'local';
+const LOCAL_SERVER = { id: LOCAL, name: 'localhost', host: 'localhost', local: true };
+$('#localTab').onclick = () => openServer(LOCAL_SERVER);
+
+// Tabs whose connection failed or dropped; one button reconnects them all.
+function paintReconnect() {
+  const n = [...views.values()].filter(v => v.failed).length;
+  $('#reconnAll').hidden = !n;
+  $('#reconnAll').textContent = `⟳ Reconnect failed (${n})`;
+}
+$('#reconnAll').onclick = () => { for (const [sid, v] of views) if (v.failed) reconnect(sid); };
+// Fresh page in the same tab position; the tab on screen stays on screen.
+function reconnect(sid) {
+  const v = views.get(sid);
+  if (!v) return;
+  const s = servers.find(x => x.id === sid) || v.server, next = v.tabEl.nextSibling, cur = shownId;
+  v.dispose();
+  views.delete(sid);
+  const p = openServer(s); // adds the tab and shows it synchronously, then connects
+  next.before(views.get(sid).tabEl);
+  show(cur);
+  saveTabs();
+  paintReconnect();
+  return p;
+}
+
 // ================= home: servers, groups, users =================
-let servers = [], users = [], savedGroups = [];
+let servers = [], users = [], savedGroups = [], groupColors = {};
 let homeMode = 'all'; // 'all' | 'fav' | 'users' | 'group:<name>'
 const UNGROUPED = 'Ungrouped';
 const groupOf = s => s.group || UNGROUPED;
@@ -106,8 +174,9 @@ try { collapsed = new Set(JSON.parse(localStorage.getItem('collapsedGroups')) ||
 const saveCollapsed = () => { try { localStorage.setItem('collapsedGroups', JSON.stringify([...collapsed])); } catch { /* ignore */ } };
 
 async function refreshServers() {
-  [servers, users, savedGroups] = await Promise.all([api.servers.list(), api.users.list(), api.groups.list()]);
+  [servers, users, savedGroups, groupColors] = await Promise.all([api.servers.list(), api.users.list(), api.groups.list(), api.groups.colors()]);
   renderNav();
+  paintTabs();
   renderServers();
   renderUsers();
 }
@@ -135,11 +204,11 @@ function renderNav() {
   $('#navFav').classList.toggle('active', homeMode === 'fav');
   $('#navUsers').classList.toggle('active', homeMode === 'users');
   $('#navDeploy').classList.toggle('active', homeMode === 'deploy');
-  $('#navGroups').replaceChildren(...groupNames().map(name => el('button', {
-    className: 'navitem' + (g === name ? ' active' : ''), title: name, onclick: () => setMode('group:' + name),
+  $('#navGroups').replaceChildren(...groupNames().map(name => tintGroup(el('button', {
+    className: 'navitem' + (g === name ? ' active' : ''), title: name, onclick: () => setMode(g === name ? 'all' : 'group:' + name), // click again = back to All Servers
   }, el('i', { textContent: name === UNGROUPED ? '◌' : '▣' }), el('span', { className: 'lbl', textContent: name }),
   el('span', { className: 'count lbl', textContent: servers.filter(s => groupOf(s) === name).length }),
-  ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name), 'icon gedit lbl')]))));
+  ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name), 'icon gedit lbl')])), name === UNGROUPED ? '' : name)));
   $('#serversView').hidden = homeMode === 'users' || homeMode === 'deploy';
   $('#usersView').hidden = homeMode !== 'users';
   $('#deployView').hidden = homeMode !== 'deploy';
@@ -197,9 +266,58 @@ async function openMetrics(s) {
   v.pickPanel?.('stats');
 }
 
+// ---- availability (probed in main, pushed every interval) ----
+// Painted in place (data-av="<serverId>:<server|ssh|desk>") so a refresh never rebuilds the table.
+let avail = {};
+const AV_NAME = { server: 'Server', ssh: 'SSH', desk: 'Desktop' };
+const avMark = (id, key) => {
+  const e = el('span', { className: 'av' });
+  e.dataset.av = `${id}:${key}`;
+  return e;
+};
+// Button label on the left, protocol status on the right (buttons share one width, see .actions .desk/.conn).
+const withAv = (btn, id, key) => {
+  btn.replaceChildren(el('span', { className: 'blbl', textContent: btn.textContent }), avMark(id, key));
+  return btn;
+};
+// Green = answered, red = failed check (refused or no answer), grey = not checked yet / checking off.
+function paintAvail() {
+  for (const e of document.querySelectorAll('[data-av]')) {
+    const [id, key] = e.dataset.av.split(':');
+    const a = avail[id];
+    const st = !a ? 'none' : a[key] === 'up' ? 'up' : 'down';
+    e.className = 'av ' + st;
+    const tip = !a ? `${AV_NAME[key]}: not checked yet (or checking is off in Settings / for this server)`
+      : `${AV_NAME[key]}: ${st === 'up' ? 'available' : 'not available'} · checked ${new Date(a.at).toLocaleString()}`;
+    if (key === 'server') e.dataset.tip = tip; // State column: instant CSS tooltip (native title waits ~2 s)
+    else e.title = tip;
+  }
+}
+// OS popup (HTML5 Notification = native notification in Electron). Off in Settings → notifications.
+const notifyOn = () => { try { return localStorage.getItem('notify') !== 'off'; } catch { return true; } };
+// Module a server page opens on (Settings → "Open servers in"). Default: File Manager.
+const PANELS = ['files', 'term', 'logs', 'stats'];
+const defaultPanel = () => { try { const p = localStorage.getItem('defaultPanel'); return PANELS.includes(p) ? p : 'files'; } catch { return 'files'; } };
+function notify(title, body) {
+  try { if (notifyOn()) new Notification(title, { body }); } catch { /* notifications blocked */ }
+}
+function onAvail(next) {
+  for (const [id, a] of Object.entries(next)) {
+    const was = avail[id]?.server;
+    if (!was || was === a.server) continue; // first check or no change: stay quiet
+    const s = servers.find(x => x.id === id);
+    if (s) notify(a.server === 'up' ? `✅ ${s.name} is back up` : `⛔ ${s.name} is not responding`, s.host);
+  }
+  avail = next;
+  paintAvail();
+}
+api.avail.onUpdate(onAvail);
+api.avail.get().then(a => { avail = a; paintAvail(); });
+
 function serverRow(s) {
   const tr = el('tr', { className: 'srow' + (alertState.get(s.id)?.size ? ' alerting' : '') },
-    el('td', {}, el('span', { className: 'dot' + (views.has(s.id) ? ' on' : '') }), el('b', { textContent: s.name })),
+    el('td', { className: 'state' }, avMark(s.id, 'server')),
+    el('td', {}, el('b', { textContent: s.name })),
     el('td', {}, el('span', { className: 'proto ' + typeOf(s), textContent: typeOf(s).toUpperCase() })),
     el('td', { className: 'mono', title: s.userLabel ? `Login: saved user "${s.userLabel}"` : '' },
       `${s.username ? s.username + '@' : ''}${s.host}` + (s.port !== defaultPort(s) ? `:${s.port}` : ''),
@@ -212,11 +330,11 @@ function serverRow(s) {
       iconBtn(s.starred ? '★' : '☆', s.starred ? 'Unfavorite' : 'Favorite', () => toggleStar(s), 'icon' + (s.starred ? ' star' : '')),
       iconBtn('✎', 'Edit', () => editServer(s)),
       iconBtn('🗑', 'Delete', () => deleteServer(s), 'icon danger'),
-      typeOf(s) === 'rdp'
+      withAv(typeOf(s) === 'rdp'
         ? iconBtn('🖥 Desktop', `Open Remote Desktop (RDP, port ${s.port})`, () => openRdp(s), 'desk')
-        : iconBtn(...(DESKTOP[s.os] || DESKTOP['']), () => openDesktop(s), 'desk'),
-      iconBtn(views.has(s.id) ? '↗ Open' : '▶ Connect',
-        typeOf(s) === 'rdp' ? `Open SSH (Windows OpenSSH, port ${s.sshPort || 22}) with the same login` : 'Connect', () => connectServer(s), 'primary')));
+        : iconBtn(...(DESKTOP[s.os] || DESKTOP['']), () => openDesktop(s), 'desk'), s.id, 'desk'),
+      withAv(iconBtn(views.has(s.id) ? '↗ Open' : '▶ SSH',
+        typeOf(s) === 'rdp' ? `Open SSH (Windows OpenSSH, port ${s.sshPort || 22}) with the same login` : 'Connect', () => connectServer(s), 'primary conn'), s.id, 'ssh')));
   tr.ondblclick = () => connectServer(s);
   return tr;
 }
@@ -232,14 +350,14 @@ function renderServers() {
   $('#countBadge').textContent = `${list.length} server${list.length === 1 ? '' : 's'}`;
   $('#homeTitle').textContent = g || (homeMode === 'fav' ? 'Favorites' : 'All Servers');
   const rows = [];
-  for (const name of groupNames()) {
+  for (const name of g ? [g] : groupNames()) { // a selected group shows only itself, not the others as empty
     const members = list.filter(s => groupOf(s) === name);
     if (!members.length && (q || homeMode === 'fav')) continue; // empty groups show only when not filtering
     const shut = !q && collapsed.has(name); // searching always shows matches
     rows.push(el('tr', {
       className: 'grprow' + (shut ? ' shut' : ''),
       onclick: () => { collapsed[collapsed.has(name) ? 'delete' : 'add'](name); saveCollapsed(); renderServers(); },
-    }, el('td', { colSpan: 8 },
+    }, el('td', { colSpan: 9 },
       el('span', { className: 'caret', textContent: shut ? '▸' : '▾' }),
       el('b', { textContent: name }),
       el('span', { className: 'count', textContent: members.length }),
@@ -247,12 +365,19 @@ function renderServers() {
       el('span', { className: 'gacts' },
         ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name))]),
         iconBtn('＋', `Add a server to ${name}`, () => editServer({ group: name === UNGROUPED ? '' : name }))))));
+    tintGroup(rows.at(-1), name === UNGROUPED ? '' : name);
     if (!shut) rows.push(...members.map(serverRow));
   }
   $('#serverRows').replaceChildren(...rows);
+  paintAvail();
   $('#emptyHome').hidden = servers.length > 0;
 }
 // ---- groups: new / rename / delete ----
+// Gentle (muted pastel) colors: readable as text tint and as a soft background in both themes.
+const GROUP_PALETTE = ['#8fb3d9', '#8fc9a8', '#d9c48f', '#d9a38f', '#d98fa8', '#b39fd9', '#8fcfcf', '#b8c98f'];
+const groupColor = g => (g && groupColors[g]) || '';
+// Tint an element with a group color (CSS uses --gc); no color = untouched.
+const tintGroup = (e, g) => { const c = groupColor(g); e.classList.toggle('gc', !!c); if (c) e.style.setProperty('--gc', c); else e.style.removeProperty('--gc'); return e; };
 function editGroup(name = '') {
   const dlg = $('#groupDlg'), f = $('#groupForm');
   $('#groupTitle').textContent = name ? 'Edit group' : 'New group';
@@ -260,12 +385,21 @@ function editGroup(name = '') {
   const n = servers.filter(s => s.group === name).length;
   $('#groupInfo').textContent = name ? `${n} server${n === 1 ? '' : 's'} in this group.` : '';
   f.querySelector('.gdel').hidden = !name;
+  let color = groupColors[name] || '';
+  const paintSw = () => $('#groupColors').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.c === color));
+  $('#groupColors').replaceChildren(...['', ...GROUP_PALETTE].map(c => {
+    const b = el('button', { type: 'button', className: 'sw' + (c ? '' : ' none'), title: c || 'No color', onclick: () => { color = c; paintSw(); } });
+    b.dataset.c = c;
+    if (c) b.style.background = c;
+    return b;
+  }));
+  paintSw();
   dlg.returnValue = '';
   dlg.showModal();
   dlg.addEventListener('close', async () => {
     try {
       if (dlg.returnValue === 'save') {
-        const next = await api.groups.save(name, f.elements.name.value);
+        const next = await api.groups.save(name, f.elements.name.value, color);
         if (name && next !== name) {
           if (collapsed.delete(name)) { collapsed.add(next); saveCollapsed(); }
           if (modeGroup() === name) homeMode = 'group:' + next;
@@ -305,7 +439,7 @@ async function openRdp(s) {
 // Desktop button for SSH servers, by the server's OS (unknown until the first connection).
 const DESKTOP = {
   windows: ['🖥 RDP', 'Open with Remote Desktop (Windows App, port 3389)'],
-  macos: ['🖥 Screen Sharing', 'Open with macOS Screen Sharing (Remote Management must be on)'],
+  macos: ['🖥 Screen','Open with macOS Screen Sharing (Remote Management must be on)'],
   linux: ['🖥 VNC', 'Open the desktop with Screen Sharing (needs a VNC server on port 5900)'],
   unix: ['🖥 VNC', 'Open the desktop with Screen Sharing (needs a VNC server on port 5900)'],
   '': ['🖥 Desktop', 'Open the remote desktop: RDP for Windows, Screen Sharing for macOS/Linux (detects the OS over SSH)'],
@@ -339,6 +473,7 @@ function editServer(s = {}) {
   f.elements.tags.value = (s.tags || []).join(', ');
   f.elements.details.value = s.details || '';
   f.elements.starred.checked = !!s.starred;
+  f.elements.probe.checked = !s.noProbe;
   $('#serverDlg').returnValue = ''; // Esc must not reuse the last 'save'
   $('#serverDlg').showModal();
 }
@@ -375,7 +510,7 @@ $('#serverDlg').addEventListener('close', async () => {
     name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, userId: e.userId.value,
     username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
     tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
-    details: e.details.value,
+    details: e.details.value, noProbe: !e.probe.checked,
   });
   refreshServers();
 });
@@ -469,7 +604,9 @@ function showProvider(p) {
   const d = aiSettings.providers[p];
   $('#keyLabel').textContent = `${d.label} API key`;
   $('#keyStatus').textContent = d.fromEnv ? `Using ${d.env} from the environment (it overrides a saved key).`
-    : d.hasKey ? 'A key is saved for this provider (encrypted in Keychain).' : 'No key for this provider — Ask AI is disabled until you add one.';
+    : d.hasKey ? 'A key is saved for this provider (encrypted in Keychain).'
+    : d.cli ? 'Runs the Cursor CLI (cursor-agent) on this Mac. Key optional: without one it uses your `cursor-agent login`.'
+    : 'No key for this provider — Ask AI is disabled until you add one.';
   f.clearKey.parentElement.hidden = !d.hasKey || d.fromEnv;
   f.clearKey.checked = false;
   f.apiKey.value = '';
@@ -485,15 +622,26 @@ async function openSettings(focusKey = false) {
   f.elements.autoUpdate.checked = aiSettings.autoUpdate;
   f.elements.logToFile.checked = aiSettings.logToFile;
   f.elements.logDir.value = aiSettings.logDir;
+  f.elements.availOn.checked = aiSettings.avail.on;
+  f.elements.availSec.value = aiSettings.avail.intervalSec;
+  f.elements.notify.checked = notifyOn();
+  f.elements.defaultPanel.value = defaultPanel();
+  f.elements.restoreTabs.checked = restoreTabsOn();
   $('#updHint').textContent = `You have version ${aiSettings.version}. Checks at startup and every 6 hours. Help → Check for Updates… checks now.`;
   f.elements.aiProvider.replaceChildren(...Object.entries(aiSettings.providers)
     .map(([value, d]) => el('option', { value, textContent: d.label + (d.hasKey ? '  ✓' : '') })));
   f.elements.aiProvider.value = aiSettings.aiProvider;
   showProvider(aiSettings.aiProvider);
+  settingsTab(focusKey ? 'ai' : 'general');
   $('#settingsDlg').returnValue = '';
   $('#settingsDlg').showModal();
   if (focusKey) f.elements.apiKey.focus();
 }
+function settingsTab(k) {
+  for (const b of document.querySelectorAll('#settingsForm .stabs button')) b.classList.toggle('on', b.dataset.tab === k);
+  for (const p of document.querySelectorAll('#settingsForm .spane')) p.hidden = p.dataset.pane !== k;
+}
+for (const b of document.querySelectorAll('#settingsForm .stabs button')) b.onclick = () => settingsTab(b.dataset.tab);
 $('#settingsForm').elements.aiProvider.onchange = e => showProvider(e.target.value);
 $('#logPick').onclick = async () => {
   const dir = await api.settings.pickLogDir($('#settingsForm').elements.logDir.value);
@@ -502,6 +650,7 @@ $('#logPick').onclick = async () => {
 $('#logOpen').onclick = () => api.log.openFolder();
 $('#logConsole').onclick = () => api.log.openConsole();
 $('#settingsBtn').onclick = () => openSettings();
+$('#consoleBtn').onclick = () => api.log.openConsole();
 
 // Confirm / small form dialog. body: string or element(s). Resolves true on OK.
 function ask({ title, body, ok = 'OK', danger = false, okDisabled = false }) {
@@ -564,12 +713,15 @@ $('#settingsForm').addEventListener('submit', async e => {
     if (f.logToFile.checked !== aiSettings.logToFile || f.logDir.value.trim() !== aiSettings.logDir) {
       await api.settings.setLog({ logToFile: f.logToFile.checked, logDir: f.logDir.value });
     }
-    try { localStorage.setItem('theme', f.theme.value); } catch { /* ignore */ }
+    if (f.availOn.checked !== aiSettings.avail.on || Number(f.availSec.value) !== aiSettings.avail.intervalSec) {
+      await api.settings.setAvail({ on: f.availOn.checked, intervalSec: f.availSec.value });
+    }
+    if (f.notify.checked && Notification.permission === 'default') Notification.requestPermission();
+    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); localStorage.setItem('restoreTabs', f.restoreTabs.checked ? 'on' : 'off'); } catch { /* ignore */ }
     $('#settingsDlg').close('save');
     toast(`Settings saved. AI: ${aiSettings.providers[f.aiProvider.value].label}`);
   } catch (err) {
-    aiMsg(aiNoKeyText(err), 'error');
-  } finally { btn.disabled = false; }
+    aiMsg(aiNoKeyText(err), 'error');  } finally { btn.disabled = false; }
 });
 $('#settingsDlg').addEventListener('close', applyTheme);
 
@@ -767,6 +919,8 @@ function closeServer(serverId) {
   if (!v) return;
   v.dispose();
   views.delete(serverId);
+  paintReconnect();
+  saveTabs();
   show('home');
 }
 
@@ -776,16 +930,23 @@ async function openServer(s) {
   const root = $('#serverTpl').content.firstElementChild.cloneNode(true);
   const q = sel => root.querySelector(sel);
   $('#views').append(root);
-  const tabEl = el('button', { className: 'tab', onclick: () => show(s.id) },
+  const tabEl = el('button', { className: 'tab', draggable: true, onclick: () => show(s.id) },
     el('span', { textContent: '▤ ' + s.name }),
     el('span', { className: 'x', textContent: '×', title: 'Disconnect', onclick: e => { e.stopPropagation(); closeServer(s.id); } }));
-  $('#tabs').append(tabEl);
+  $('#tabs .tabtools').before(tabEl);
 
-  const v = { root, tabEl, connId: null, panel: 'files' };
+  tabEl.dataset.sid = s.id;
+  const v = { root, tabEl, connId: null, panel: 'files', server: s, failed: false };
   views.set(s.id, v);
+  saveTabs();
 
   q('.sname').textContent = s.name;
-  q('.saddr').textContent = typeOf(s) === 'rdp' // the server page is the SSH side of an RDP entry
+  paintTabs();
+  if (s.local) { // only the Terminal module works without SSH
+    root.querySelectorAll('.srvbody > .side .navitem').forEach(b => (b.hidden = b.dataset.panel !== 'term'));
+    root.classList.add('localsrv');
+  }
+  q('.saddr').textContent = s.local ? 'This computer (local shell)' : typeOf(s) === 'rdp' // the server page is the SSH side of an RDP entry
     ? `${s.domain ? s.domain + '\\' : ''}${s.username}@${s.host}:${s.sshPort || 22} (SSH)`
     : `${s.username}@${s.host}:${s.port}`;
   q('.sdetails').textContent = q('.sdetails').title = s.details || '';
@@ -821,7 +982,7 @@ async function openServer(s) {
     const sess = { host, title: `Session ${++sessNo}` };
     const titleEl = el('span', { className: 'ttitle', textContent: sess.title, title: 'Double-click to rename' });
     titleEl.ondblclick = e => { e.stopPropagation(); renameSession(sess, titleEl); };
-    sess.tabEl = el('div', { className: 'ttab', onclick: () => activateSession(sess) },
+    sess.tabEl = el('div', { className: 'ttab', draggable: true, onclick: () => activateSession(sess) },
       el('span', { className: 'tdot' }), titleEl,
       iconBtn('×', 'Close session', () => closeSession(sess), 'x'));
     q('.ttablist').append(sess.tabEl);
@@ -879,6 +1040,11 @@ async function openServer(s) {
   const openInTerminal = dir => runInTerminal(`cd ${shq(dir)}\r`);
 
   q('.tnew').onclick = () => newSession();
+  // Drag terminal session tabs to reorder; the list follows the new order.
+  dragReorder(q('.ttablist'), '.ttab', () => {
+    const order = [...q('.ttablist').children];
+    sessions.sort((a, b) => order.indexOf(a.tabEl) - order.indexOf(b.tabEl));
+  });
 
   // ---- scripts side panel ----
   let scripts = [], dragId = null;
@@ -1530,7 +1696,7 @@ async function openServer(s) {
         state.set(k, { val, threshold: a.threshold, since: Date.now() });
         const msg = `${s.name}: ${KNAME[k]} at ${Math.round(val)}% (alert above ${a.threshold}%)`;
         toast('🔔 ' + msg, true);
-        try { new Notification('EranTerm alert', { body: msg }); } catch { /* notifications blocked */ }
+        notify('EranTerm alert', msg);
       } else if (val < a.threshold - 5) { firing[k] = false; state.delete(k); }
       else if (firing[k]) state.set(k, { ...state.get(k), val }); // keep the latest value for the tooltip
     }
@@ -1716,6 +1882,8 @@ async function openServer(s) {
     v.connId = null;
     stopTail();
     setStatus('DISCONNECTED — click to reconnect', 'err');
+    v.failed = true;
+    paintReconnect();
     if (msg) toast(`${s.name}: ${msg}`, true);
   };
   v.dispose = () => {
@@ -1729,24 +1897,23 @@ async function openServer(s) {
     root.remove();
     tabEl.remove();
   };
-  q('.status').onclick = () => {
-    if (v.connId) return;
-    closeServer(s.id);
-    openServer(servers.find(x => x.id === s.id) || s);
-  };
+  q('.status').onclick = () => { if (!v.connId) reconnect(s.id); };
 
-  pickPanel('files');
+  pickPanel(s.local ? 'term' : defaultPanel());
   show(s.id);
   try {
     v.connId = await api.ssh.connect(s.id);
   } catch (e) {
     setStatus('FAILED — click to retry', 'err');
+    v.failed = true;
+    paintReconnect();
     toast(`${s.name}: ${cleanErr(e)}`, true);
     return;
   }
   if (!views.has(s.id)) return api.ssh.disconnect(v.connId); // tab closed while connecting
   setStatus('● CONNECTED', 'on');
   pickPanel(v.panel);
+  if (s.local) v.pollMetrics = () => {}; // no metrics without SSH
   v.pollMetrics();
 }
 
@@ -1755,7 +1922,16 @@ setInterval(() => {
   for (const v of views.values()) if (v.connId && (!v.root.hidden || v.hasAlerts?.())) v.pollMetrics();
 }, 5000);
 
-refreshServers();
+refreshServers().then(() => {
+  if (!restoreTabsOn()) return;
+  let ids = [];
+  try { ids = JSON.parse(localStorage.getItem('openTabs')) || []; } catch { /* nothing to reopen */ }
+  for (const sid of ids) {
+    const s = sid === LOCAL ? LOCAL_SERVER : servers.find(x => x.id === sid);
+    if (s) openServer(s);
+  }
+  show('home');
+});
 
 // ================= foldable side menus (one state for all menus) =================
 const setFolded = on => {

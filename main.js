@@ -12,8 +12,8 @@ const util = require('node:util');
 const { METRICS_CMD, parseMetrics, TOP_CMD, parseTop } = require('./metrics');
 const { killCmd, DROP_CACHES_CMD, SCAN_CMD, parseScan, cleanCmd } = require('./maint');
 const winlogs = require('./winlogs');
-const { shq, buildRdp, remoteDir, AI_PROVIDERS, validModel, normModel, buildAiRequest, parseAiResponse, buildModelsRequest, parseModels, hostKeyDecision } = require('./util');
-const { runDeployment } = require('./deploy');
+const { shq, buildRdp, remoteDir, AI_PROVIDERS, validModel, normModel, parseCliModels, buildAiRequest, parseAiResponse, buildModelsRequest, parseModels, hostKeyDecision } = require('./util');
+const { runDeployment, toSteps } = require('./deploy');
 
 const rpath = path.posix;
 
@@ -22,6 +22,11 @@ const rpath = path.posix;
 // Also keeps the same data folder. The visible name (window, menu, installer) is still EranTerm.
 app.setName('EraTerm');
 app.setPath('userData', path.join(app.getPath('appData'), 'EraTerm'));
+// Everything the user sees says EranTerm: logs folder, macOS app menu (labels set in buildMenu), About panel.
+const OLD_LOGS = app.getPath('logs');
+app.setAppLogsPath(isMacPlatform() ? path.join(os.homedir(), 'Library', 'Logs', 'EranTerm') : path.join(app.getPath('userData'), 'logs'));
+app.setAboutPanelOptions({ applicationName: 'EranTerm' });
+function isMacPlatform() { return process.platform === 'darwin'; }
 
 // ponytail: JSON files in userData; move to SQLite if the server list gets large.
 const dataFile = name => path.join(app.getPath('userData'), name);
@@ -102,7 +107,13 @@ function showVersion() {
 }
 function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    ...(process.platform === 'darwin' ? [{ role: 'appMenu', label: 'EranTerm' }] : []),
+    // Explicit labels: the role defaults use the internal app name ("Quit EraTerm").
+    ...(process.platform === 'darwin' ? [{ label: 'EranTerm', submenu: [
+      { role: 'about', label: 'About EranTerm' }, { type: 'separator' },
+      { role: 'services' }, { type: 'separator' },
+      { role: 'hide', label: 'Hide EranTerm' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' },
+      { role: 'quit', label: 'Quit EranTerm' },
+    ] }] : []),
     { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
     { role: 'help', submenu: [
       { label: `Version ${app.getVersion()}`, click: showVersion },
@@ -223,8 +234,10 @@ ipcMain.handle('servers:save', (_e, s) => {
     userId: s.userId && users().some(u => u.id === s.userId) ? s.userId : '',
     passwordEnc: s.password ? enc(s.password) : prev?.passwordEnc || '',
     os: type === 'rdp' ? 'windows' : prev?.host === String(s.host) ? prev.os || '' : '', // new host: detect again
+    noProbe: !!s.noProbe, // availability checks off for this server
   };
   writeJson('servers.json', prev ? list.map(x => (x.id === rec.id ? rec : x)) : [...list, rec]);
+  if (!prev || prev.host !== rec.host || prev.port !== rec.port || prev.sshPort !== rec.sshPort || !!prev.noProbe !== rec.noProbe) scheduleAvail();
   return publicServer(rec);
 });
 
@@ -243,8 +256,11 @@ const GROUP_RESERVED = 'Ungrouped';
 const groupList = () => readJson('groups.json', []);
 const cleanGroup = n => String(n || '').trim().slice(0, 100);
 ipcMain.handle('groups:list', () => groupList());
-// save(old, name): old empty = create; otherwise rename (members follow). Returns the saved name.
-ipcMain.handle('groups:save', (_e, oldName, name) => {
+// Optional color per group (gentle palette picked in the renderer): group_colors.json { name: '#rrggbb' }.
+const groupColors = () => readJson('group_colors.json', {});
+ipcMain.handle('groups:colors', () => groupColors());
+// save(old, name, color): old empty = create; otherwise rename (members follow). Returns the saved name.
+ipcMain.handle('groups:save', (_e, oldName, name, color) => {
   const old = cleanGroup(oldName), next = cleanGroup(name);
   if (!next) throw new Error('Group name is required');
   if (next.toLowerCase() === GROUP_RESERVED.toLowerCase()) throw new Error(`"${GROUP_RESERVED}" is reserved`);
@@ -252,6 +268,10 @@ ipcMain.handle('groups:save', (_e, oldName, name) => {
   if (next !== old && taken.has(next)) throw new Error(`A group named "${next}" already exists`);
   writeJson('groups.json', [...new Set([...groupList().filter(g => g !== old), next])]);
   if (old) writeJson('servers.json', servers().map(s => (s.group === old ? { ...s, group: next } : s)));
+  const colors = groupColors();
+  delete colors[old];
+  if (/^#[0-9a-f]{6}$/i.test(color || '')) colors[next] = color; else delete colors[next];
+  writeJson('group_colors.json', colors);
   return next;
 });
 // Deleting a group keeps its servers: they move to Ungrouped.
@@ -259,6 +279,8 @@ ipcMain.handle('groups:delete', (_e, name) => {
   const n = cleanGroup(name);
   writeJson('groups.json', groupList().filter(g => g !== n));
   writeJson('servers.json', servers().map(s => (s.group === n ? { ...s, group: '' } : s)));
+  const colors = groupColors();
+  if (delete colors[n]) writeJson('group_colors.json', colors);
 });
 
 // ---------- settings ----------
@@ -281,7 +303,8 @@ ipcMain.handle('settings:setAutoUpdate', (_e, on) => {
 // Log to file: { logToFile, logDir }. Default off; folder defaults to the OS log folder.
 const logSettings = () => {
   const st = readJson('settings.json', {});
-  return { logToFile: !!st.logToFile, logDir: st.logDir || app.getPath('logs') };
+  // A saved folder equal to the old default (…/EraTerm logs) follows the new default.
+  return { logToFile: !!st.logToFile, logDir: st.logDir && st.logDir !== OLD_LOGS ? st.logDir : app.getPath('logs') };
 };
 ipcMain.handle('settings:setLog', (_e, { logToFile, logDir }) => {
   logDir = String(logDir || '').trim() || app.getPath('logs');
@@ -300,11 +323,12 @@ ipcMain.handle('log:openFolder', () => shell.openPath(logSettings().logDir));
 ipcMain.handle('settings:get', () => ({
   version: app.getVersion(),
   autoUpdate: autoUpdateOn(),
+  avail: availSettings(),
   ...logSettings(),
   aiProvider: aiProvider(),
   providers: Object.fromEntries(Object.entries(AI_PROVIDERS).map(([id, d]) => [id, {
     label: d.label, models: d.models, env: d.env, model: aiConf(id).model,
-    hasKey: !!aiKey(id), fromEnv: !!process.env[d.env],
+    hasKey: !!aiKey(id), fromEnv: !!process.env[d.env], cli: !!d.cli,
   }])),
 }));
 // { provider, key? (blank = keep, null = remove), model }
@@ -405,12 +429,63 @@ const openConn = serverId => new Promise((resolve, reject) => {
   });
   conn.connect(cfg);
 });
-ipcMain.handle('ssh:connect', (_e, serverId) => openConn(serverId));
+// ---------- localhost terminal (the "+" tab) ----------
+// A pty without native modules: macOS ships perl with IO::Pty. The helper relays stdin/stdout to a login
+// shell and reads "rows cols\n" resize lines on fd 3.
+// ponytail: no Windows (no pty there without ConPTY); node-pty covers Windows if that's ever needed.
+const LOCAL = 'local';
+const PTY_PL = String.raw`
+use strict; use IO::Pty; use POSIX ();
+my ($rows, $cols, $sh, $cwd) = @ARGV;
+my $pty = IO::Pty->new or die "pty: $!";
+my $setsz = sub { ioctl($pty, IO::Tty::Constant::TIOCSWINSZ(), pack('S4', $_[0], $_[1], 0, 0)) };
+$setsz->($rows, $cols);
+my $pid = fork; die "fork: $!" unless defined $pid;
+if (!$pid) {
+  $pty->make_slave_controlling_terminal; my $s = $pty->slave; close $pty;
+  open STDIN, '<&', $s; open STDOUT, '>&', $s; open STDERR, '>&', $s; close $s;
+  chdir $cwd; $ENV{TERM} = 'xterm-256color';
+  exec { $sh } '-' . ($sh =~ s{.*/}{}r) or POSIX::_exit(127);
+}
+$pty->close_slave; open my $ctl, '<&=', 3 or die "fd3: $!";
+my ($buf, $cbuf) = ('', '');
+while (1) {
+  my $rin = ''; vec($rin, fileno($pty), 1) = 1; vec($rin, 0, 1) = 1; vec($rin, 3, 1) = 1;
+  next if select(my $r = $rin, undef, undef, undef) < 0;
+  if (vec($r, fileno($pty), 1)) { my $n = sysread($pty, $buf, 65536); last unless $n; syswrite(STDOUT, $buf); }
+  if (vec($r, 0, 1)) { my $n = sysread(STDIN, $buf, 65536); if (!$n) { kill 'HUP', $pid; last } syswrite($pty, $buf); }
+  if (vec($r, 3, 1)) { sysread($ctl, $cbuf, 64, length $cbuf) or last; $setsz->($1, $2) while $cbuf =~ s/^(\d+) (\d+)\n//; }
+}
+kill 'HUP', $pid; waitpid $pid, 0;`;
+function localShell(cols, rows, cwd) {
+  if (process.platform === 'win32') throw new Error('The localhost terminal is available on macOS and Linux.');
+  const sh = process.env.SHELL || '/bin/zsh';
+  const dir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
+  const p = spawn('perl', ['-e', PTY_PL, String(rows || 24), String(cols || 80), sh, dir], { stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
+  p.stdin.on('error', () => {}); p.stdio[3].on('error', () => {});
+  p.stderr.on('data', d => console.warn(`localhost terminal: ${String(d).trim()}`));
+  return {
+    proc: p,
+    write: d => p.stdin.writable && p.stdin.write(d),
+    setWindow: (r, c) => p.stdio[3].writable && p.stdio[3].write(`${r | 0} ${c | 0}\n`),
+    close: () => p.stdin.end(),
+  };
+}
+
+ipcMain.handle('ssh:connect', (_e, serverId) => (serverId === LOCAL ? LOCAL : openConn(serverId)));
 ipcMain.handle('ssh:os', (_e, connId) => connOs(connId)); // 'windows' | 'macos' | 'linux' | 'unix' | ''
 
 ipcMain.on('ssh:disconnect', (_e, connId) => conns.get(connId)?.conn.end());
 
 ipcMain.handle('ssh:shell', async (_e, connId, cols, rows, cwd) => {
+  if (connId === LOCAL) {
+    const sh = localShell(cols, rows, cwd), id = crypto.randomUUID();
+    shells.set(id, sh);
+    sh.proc.stdout.on('data', d => send('ssh:data', id, d));
+    sh.proc.on('close', () => { shells.delete(id); send('ssh:closed', id); });
+    sh.proc.on('error', err => send('ssh:data', id, `\r\n${err.message}\r\n`));
+    return id;
+  }
   const stream = await p(cb => getConn(connId).conn.shell({ term: 'xterm-256color', cols, rows }, cb));
   const id = crypto.randomUUID();
   shells.set(id, stream);
@@ -531,6 +606,56 @@ ipcMain.handle('remote:open', async (_e, serverId) => {
   await shell.openExternal(`vnc://${s.username ? encodeURIComponent(s.username) + '@' : ''}${host}`);
   patchServer(serverId, { lastSeen: Date.now() });
   return { os, ...copyPassword(s) };
+});
+
+// ---------- availability (background TCP probes, pushed to the window as 'avail:update') ----------
+// One TCP connect per button port: open = 'up', refused = 'down' (host answered, service off),
+// timeout/unreachable = 'unknown'. A server is 'up' if any port answered at all (open or refused).
+// ponytail: TCP connect only (no ICMP ping: needs raw sockets / spawning ping).
+const net = require('node:net');
+const probePort = (host, port, ms = 2000) => new Promise(resolve => {
+  const sock = net.connect({ host, port: Number(port) });
+  const done = r => { sock.destroy(); resolve(r); };
+  sock.setTimeout(ms, () => done('unknown'));
+  sock.once('connect', () => done('up'));
+  sock.once('error', e => done(e.code === 'ECONNREFUSED' ? 'down' : 'unknown'));
+});
+const availSettings = () => {
+  const a = readJson('settings.json', {}).avail || {};
+  return { on: a.on !== false, intervalSec: Math.max(10, Number(a.intervalSec) || 60) };
+};
+// Ports behind each Home button. Desktop of an SSH server with unknown OS: RDP or VNC, whichever answers.
+const DESK_PORTS = { windows: [3389], macos: [5900], linux: [5900], unix: [5900] };
+const availPorts = s => (s.type === 'rdp'
+  ? { ssh: [Number(s.sshPort) || 22], desk: [Number(s.port) || 3389] }
+  : { ssh: [Number(s.port) || 22], desk: DESK_PORTS[s.os] || [3389, 5900] });
+const best = rs => (rs.includes('up') ? 'up' : rs.includes('down') ? 'down' : 'unknown');
+async function probeServer(s) {
+  const ports = availPorts(s);
+  const [ssh, desk] = await Promise.all([ports.ssh, ports.desk].map(ps => Promise.all(ps.map(pt => probePort(s.host, pt))).then(best)));
+  return { server: ssh !== 'unknown' || desk !== 'unknown' ? 'up' : 'down', ssh, desk, at: Date.now() };
+}
+const avail = {}; // serverId -> { server, ssh, desk, at }
+let availTimer, availRun = 0;
+async function probeAll() {
+  const run = ++availRun; // a newer run (settings / server change) wins
+  const st = availSettings();
+  const list = st.on ? servers().filter(s => !s.noProbe) : [];
+  const res = await Promise.all(list.map(async s => [s.id, await probeServer(s)]));
+  if (run !== availRun) return;
+  for (const k of Object.keys(avail)) delete avail[k];
+  Object.assign(avail, Object.fromEntries(res));
+  send('avail:update', avail);
+}
+function scheduleAvail() {
+  clearTimeout(availTimer);
+  probeAll().catch(e => console.error('availability:', e.message))
+    .finally(() => { availTimer = setTimeout(scheduleAvail, availSettings().intervalSec * 1000); });
+}
+ipcMain.handle('avail:get', () => avail);
+ipcMain.handle('settings:setAvail', (_e, { on, intervalSec }) => {
+  writeJson('settings.json', { ...readJson('settings.json', {}), avail: { on: !!on, intervalSec: Math.max(10, Number(intervalSec) || 60) } });
+  scheduleAvail();
 });
 
 // ---------- scripts (run through the terminal) ----------
@@ -773,18 +898,22 @@ async function sftpPutDir(sftp, local, remoteParent, prog) {
 }
 
 // ---------- deployments ----------
-const deployments = () => readJson('deployments.json', []);
-const cleanDeployment = d => ({
-  id: d.id || crypto.randomUUID(),
-  name: String(d.name || 'Untitled deployment').slice(0, 200),
-  targets: (d.targets || []).map(String),
-  parallel: !!d.parallel,
-  files: (d.files || []).map(f => ({ local: String(f.local), remoteDir: String(f.remoteDir || '') })),
-  stages: Object.fromEntries(['pre', 'deploy', 'post'].map(k => [k, {
-    commands: (d.stages?.[k]?.commands || []).map(String),
-    checks: (d.stages?.[k]?.checks || []).map(c => ({ ...c })),
-  }])),
-});
+// Older saves (fixed pre/files/deploy/post stages) come back as steps; they are rewritten on the next save.
+const deployments = () => readJson('deployments.json', []).map(cleanDeployment);
+const STEP_TYPES = ['command', 'check', 'files'];
+const cleanStep = st => (st.type === 'files'
+  ? { type: 'files', files: (st.files || []).map(f => ({ local: String(f.local), remoteDir: String(f.remoteDir || '') })) }
+  : st.type === 'check' ? { type: 'check', check: { ...(st.check || {}) } }
+    : { type: 'command', command: String(st.command || '') });
+function cleanDeployment(d) {
+  return {
+    id: d.id || crypto.randomUUID(),
+    name: String(d.name || 'Untitled deployment').slice(0, 200),
+    targets: (d.targets || []).map(String),
+    parallel: !!d.parallel,
+    steps: toSteps(d).filter(st => STEP_TYPES.includes(st.type)).map(cleanStep),
+  };
+}
 
 ipcMain.handle('deploy:list', () => deployments());
 ipcMain.handle('deploy:save', (_e, d) => {
@@ -800,19 +929,35 @@ ipcMain.handle('deploy:pickFiles', async () => {
 });
 
 // Run a command or multi-line script through `sh -s` (or its #! interpreter), streaming output.
-const runScript = (conn, script, onData) => new Promise((resolve, reject) => {
+// The remote shell first prints its PID (exec keeps it) into `pids`, so Stop can kill the process tree:
+// without a pty, dropping the SSH connection does not stop what is running on the server.
+const PID_MARK = '@@ERANTERM_PID ';
+const runScript = (conn, script, onData, pids) => new Promise((resolve, reject) => {
   const body = String(script).replace(/\r\n/g, '\n');
   const nl = body.indexOf('\n');
   const interp = body.startsWith('#!') ? body.slice(2, nl < 0 ? undefined : nl).trim() : 'sh';
-  conn.exec(`${interp} -s`, (err, stream) => {
+  conn.exec(`echo "${PID_MARK}$$"; exec ${interp} -s`, (err, stream) => {
     if (err) return reject(err);
+    let pid = null, head = '';
     const out = d => onData?.(d.toString('utf8'));
-    stream.on('data', out);
+    stream.on('data', d => {
+      if (pid !== null) return out(d);
+      head += d.toString('utf8');
+      const i = head.indexOf('\n');
+      if (i < 0) return;
+      pid = head.startsWith(PID_MARK) ? head.slice(PID_MARK.length, i).trim() : '';
+      if (/^\d+$/.test(pid)) pids?.add(pid);
+      const rest = pid ? head.slice(i + 1) : head;
+      if (rest) onData?.(rest);
+    });
     stream.stderr.on('data', out);
-    stream.on('close', code => resolve({ code: code ?? -1 }));
+    stream.on('close', code => { pids?.delete(pid); resolve({ code: code ?? -1 }); });
     stream.end(body + '\n');
   });
 });
+// Children first, so nothing gets re-parented before it is killed. ponytail: needs pgrep (Linux/macOS have it);
+// without it only the top shell is killed.
+const killTreeCmd = pids => `k(){ for c in $(pgrep -P "$1" 2>/dev/null); do k "$c"; done; kill -TERM "$1" 2>/dev/null; }; ${pids.map(p => `k ${p}`).join('; ')}`;
 
 const deployRuns = new Map(); // runId -> AbortController
 ipcMain.handle('deploy:run', (_e, d) => {
@@ -828,10 +973,18 @@ ipcMain.handle('deploy:run', (_e, d) => {
     connect: async t => {
       const connId = await openConn(t.id);
       const { conn } = conns.get(connId);
-      const kill = () => conn.end(); // cancel interrupts whatever is running
-      ac.signal.addEventListener('abort', kill);
+      if (ac.signal.aborted) { conn.end(); throw new Error('Cancelled'); } // Stop pressed while connecting
+      const pids = new Set();
+      // Stop: kill the remote commands, then drop the connection (which ends uploads and checks too).
+      const kill = () => {
+        const drop = () => conn.destroy();
+        setTimeout(drop, 3000); // the kill command itself must not hang the stop
+        if (pids.size) exec(conn, killTreeCmd([...pids])).catch(() => {}).finally(drop);
+        else drop();
+      };
+      ac.signal.addEventListener('abort', kill, { once: true });
       return {
-        exec: (script, onData) => runScript(conn, script, onData),
+        exec: (script, onData) => runScript(conn, script, onData, pids),
         upload: (local, dir) => tarUpload(conn, local, dir),
         close: () => { ac.signal.removeEventListener('abort', kill); conn.end(); },
       };
@@ -908,11 +1061,53 @@ async function aiFetch(provider, req) {
   if (!res.ok) throw new Error(`${name}: ${errMsg || `API error ${res.status}`}`);
   return body;
 }
+// ---- Cursor: the Cursor CLI in print mode (no public chat API). The key goes in the env, never argv.
+// GUI apps on macOS get a short PATH, so the CLI's install folders are checked first.
+// ponytail: macOS/Linux only (the CLI is a .cmd on Windows, which needs a shell to spawn).
+const CURSOR_BINS = ['.local/bin/cursor-agent', '.local/bin/agent'].map(b => path.join(os.homedir(), b))
+  .concat(['/opt/homebrew/bin/cursor-agent', '/usr/local/bin/cursor-agent']);
+const cursorBin = () => CURSOR_BINS.find(b => fs.existsSync(b)) || 'cursor-agent';
+const CURSOR_AUTH = /api.?key|auth|log ?in|unauthori[sz]ed|not logged/i;
+function cursorRun(args, key, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env, ...(key ? { CURSOR_API_KEY: key } : {}) };
+    const p = spawn(cursorBin(), args, { env, cwd: os.tmpdir(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    const timer = setTimeout(() => { p.kill(); reject(new Error(`Cursor: no answer after ${timeoutMs / 1000} s.`)); }, timeoutMs);
+    p.stdout.on('data', d => (out += d));
+    p.stderr.on('data', d => (err += d));
+    p.on('error', e => {
+      clearTimeout(timer);
+      reject(new Error(e.code === 'ENOENT'
+        ? 'Cursor CLI not found. Install it with: curl https://cursor.com/install -fsS | bash — then log in (cursor-agent login) or add a Cursor API key.'
+        : `Cursor: ${e.message}`));
+    });
+    p.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) return resolve(out);
+      const msg = (err || out).trim().split('\n').slice(-3).join(' ').slice(0, 300) || `exit code ${code}`;
+      reject(new Error(CURSOR_AUTH.test(msg) ? `NO_API_KEY: Cursor: ${msg}` : `Cursor: ${msg}`));
+    });
+  });
+}
+const cursorAsk = (key, model, system, content) =>
+  cursorRun(['-p', '--output-format', 'text', '--model', model, `${system}\n\n${content}`], key);
+const cursorModels = async key => {
+  const ids = parseCliModels(await cursorRun(['models'], key, 30000).catch(() => cursorRun(['--list-models'], key, 30000)));
+  if (!ids.length) throw new Error('Cursor CLI listed no models (type a model id, or use "auto").');
+  return ids;
+};
+
 // override: { provider, key, model } from the Settings dialog (Test before saving); otherwise saved settings.
 async function callAI(system, content, maxTokens, override = {}) {
   const provider = override.provider || aiProvider();
   const name = AI_PROVIDERS[provider].label;
   const key = override.key || aiKey(provider);
+  if (AI_PROVIDERS[provider].cli) {
+    const text = (await cursorAsk(key, normModel(override.model) || aiConf(provider).model, system, content)).trim();
+    if (!text) throw new Error(`${name} returned an empty answer (try again, or another model).`);
+    return text;
+  }
   if (!key) throw new Error(`NO_API_KEY: AI is not configured. Add a ${name} API key in Settings → AI configuration.`);
   const model = normModel(override.model) || aiConf(provider).model;
   const body = await aiFetch(provider, buildAiRequest(provider, { key, model, system, content, maxTokens }));
@@ -925,6 +1120,7 @@ async function callAI(system, content, maxTokens, override = {}) {
 ipcMain.handle('ai:models', async (_e, { provider, key }) => {
   if (!AI_PROVIDERS[provider]) throw new Error('Unknown AI provider');
   const k = String(key || '').trim() || aiKey(provider);
+  if (AI_PROVIDERS[provider].cli) return cursorModels(k);
   if (!k) throw new Error(`NO_API_KEY: Enter a ${AI_PROVIDERS[provider].label} API key first.`);
   return parseModels(provider, await aiFetch(provider, buildModelsRequest(provider, k)));
 });
@@ -958,7 +1154,7 @@ ipcMain.handle('ai:analyze', async (_e, connId, { kind, question, text, source }
 });
 
 ipcMain.handle('ai:suggest', async (_e, connId, request) => {
-  const uname = conns.get(connId)?.uname || 'unknown Linux';
+  const uname = conns.get(connId)?.uname || (connId === LOCAL ? `${os.type()} ${os.release()} ${os.arch()} (this computer)` : 'unknown Linux');
   const text = await callAI(SYSTEM, `Server: ${uname}\nRequest: ${request}`, 1024);
   const json = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
   if (typeof json.command !== 'string' || !json.command.trim()) throw new Error('Model returned no command');
@@ -971,6 +1167,7 @@ app.whenReady().then(() => {
   console.info(`EranTerm ${app.getVersion()} started (${process.platform} ${process.arch}, Electron ${process.versions.electron})`);
   buildMenu();
   createWindow();
+  scheduleAvail();
   if (autoUpdateOn()) setTimeout(checkUpdates, 10e3); // after startup settles
 });
 app.on('window-all-closed', () => { for (const c of conns.values()) c.conn.end(); app.quit(); });

@@ -13,7 +13,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   groups: {
     list: () => ipcRenderer.invoke('groups:list'),
-    save: (oldName, name) => ipcRenderer.invoke('groups:save', oldName, name),
+    save: (oldName, name, color) => ipcRenderer.invoke('groups:save', oldName, name, color),
+    colors: () => ipcRenderer.invoke('groups:colors'),
     delete: name => ipcRenderer.invoke('groups:delete', name),
   },
   users: {
@@ -27,6 +28,11 @@ contextBridge.exposeInMainWorld('api', {
     setAutoUpdate: on => ipcRenderer.invoke('settings:setAutoUpdate', on),
     setLog: a => ipcRenderer.invoke('settings:setLog', a), // { logToFile, logDir }
     pickLogDir: cur => ipcRenderer.invoke('settings:pickLogDir', cur),
+    setAvail: a => ipcRenderer.invoke('settings:setAvail', a), // { on, intervalSec }
+  },
+  avail: {
+    get: () => ipcRenderer.invoke('avail:get'),
+    onUpdate: on('avail:update'),
   },
   log: {
     all: () => ipcRenderer.invoke('log:all'),
