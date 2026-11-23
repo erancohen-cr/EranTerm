@@ -1086,6 +1086,8 @@ async function openServer(s) {
         el('div', { className: 'sc-head' },
           canDrag ? el('span', { className: 'grip', textContent: '⋮⋮', title: 'Drag to reorder' }) : null,
           el('b', { textContent: x.name }),
+          x.root ? el('span', { textContent: '🔒', title: 'Runs as root (sudo)' }) : null,
+          x.confirm ? el('span', { textContent: '⏎', title: 'Waits for Enter before executing' }) : null,
           el('span', { className: 'grow' }),
           iconBtn('✎', 'Edit', () => editScript(x)),
           iconBtn('🗑', 'Delete', () => deleteScript(x), 'icon danger'),
@@ -1136,15 +1138,19 @@ async function openServer(s) {
   function runScript(x) {
     try { localStorage.setItem('scriptLastRun', JSON.stringify({ ...lastRun(), [x.id]: Date.now() })); } catch { /* ignore */ }
     const body = x.command.replace(/\r\n/g, '\n').trimEnd();
-    if (!body.includes('\n')) return runInTerminal(body + '\r');
-    // multi-line: feed through a heredoc so blocks/functions run as one script
-    const interp = body.startsWith('#!') ? body.slice(2, body.indexOf('\n')).trim() : 'sh';
-    runInTerminal(`${interp} -s <<'ERATERM_SCRIPT'\r${body.replace(/\n/g, '\r')}\rERATERM_SCRIPT\r`);
+    const end = x.confirm ? '' : '\r'; // confirm: leave the last line unsent so the user's Enter runs it
+    if (!body.includes('\n') && !x.root) return runInTerminal(body + end);
+    // multi-line (or root): feed through a heredoc so blocks/functions run as one script
+    const nl = body.indexOf('\n');
+    const interp = body.startsWith('#!') ? body.slice(2, nl < 0 ? undefined : nl).trim() : 'sh';
+    runInTerminal(`${x.root ? 'sudo ' : ''}${interp} -s <<'ERATERM_SCRIPT'\r${body.replace(/\n/g, '\r')}\rERATERM_SCRIPT${end}`);
   }
   function editScript(x = {}) {
     const f = $('#scriptForm');
     f.reset();
     for (const k of ['id', 'name', 'description', 'command']) f.elements[k].value = x[k] || '';
+    f.elements.root.checked = !!x.root;
+    f.elements.confirm.checked = !!x.confirm;
     f.elements.tags.value = (x.tags || []).join(', ');
     // existing tags as one-click chips
     const all = [...new Set(scripts.flatMap(y => y.tags || []))].sort();
@@ -1162,7 +1168,7 @@ async function openServer(s) {
       if (dlg.returnValue !== 'save') return;
       const e = f.elements;
       try {
-        await api.scripts.save({ id: e.id.value || undefined, name: e.name.value, description: e.description.value, command: e.command.value, tags: e.tags.value });
+        await api.scripts.save({ id: e.id.value || undefined, name: e.name.value, description: e.description.value, command: e.command.value, tags: e.tags.value, root: e.root.checked, confirm: e.confirm.checked });
         loadScripts();
       } catch (err) { toast(cleanErr(err), true); }
     }, { once: true });

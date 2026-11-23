@@ -357,6 +357,8 @@
       <label>Tags <input name="tags" placeholder="comma separated, e.g. disk, linux"></label>
       <div id="scriptTagPick" class="sc-tags"></div>
       <label>Command or script <textarea name="command" class="mono" rows="9" required spellcheck="false" placeholder="df -h&#10;# multi-line scripts run with sh (or the #! interpreter)"></textarea></label>
+      <label class="row"><input name="root" type="checkbox"> Run as root (sudo; it asks for the password in the terminal unless sudo is passwordless)</label>
+      <label class="row"><input name="confirm" type="checkbox"> Wait for Enter (Run types it into the terminal; press Enter to execute)</label>
       <menu><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary">Save</button></menu>
     </form>
   </dialog>
