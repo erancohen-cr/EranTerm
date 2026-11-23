@@ -1,33 +1,40 @@
-/* global api, el, iconBtn, toast, cleanErr, servers, notify */
+/* global api, el, $, iconBtn, toast, cleanErr, servers, notify */
 // Deployments panel: edit saved deployments, run them on many servers, watch per-server progress.
 // Runs happen in main (deploy.js); this file only edits definitions and renders events.
 
 const deployRunHandlers = new Map(); // runId -> event handler
 api.deploy.onEvent((runId, ev) => deployRunHandlers.get(runId)?.(ev));
 
-const D_STAGES = [
-  ['pre', 'Pre-deploy', 'Runs first: backups, stopping services, sanity checks.'],
-  ['files', 'Files', 'Copied to every target server. Folders keep their structure.'],
-  ['deploy', 'Deploy', 'Install and configure.'],
-  ['post', 'Post-deploy', 'Restart services, smoke tests, cleanup.'],
-];
 const D_CHECKS = { log: 'Log check', port: 'TCP port', exit: 'Script exit code' };
 const D_STATUS = { pending: 'Pending', running: 'Running', success: 'Success', warning: 'Success with alerts', failed: 'Failed', cancelled: 'Cancelled', skipped: 'Skipped' };
+// Step types the builder can add (mirrors deploy.js).
+const D_TYPES = {
+  command: { icon: '⌘', title: 'Command / script', short: 'Command' },
+  check: { icon: '✓', title: 'Verification', short: 'Verify' },
+  files: { icon: '⇪', title: 'Files', short: 'Files' },
+};
 
 const newCheck = (type, onFail = 'stop') => ({
   type, onFail, timeout: type === 'exit' ? 0 : 30,
   ...(type === 'log' ? { file: '', pattern: '', expect: 'present', lines: 200 }
     : type === 'port' ? { host: '', port: '' } : { command: '', expectCode: 0 }),
 });
-const blankDeployment = () => ({
-  id: null, name: 'New deployment', targets: [], parallel: false, files: [],
-  stages: { pre: { commands: [], checks: [] }, deploy: { commands: [], checks: [] }, post: { commands: [], checks: [] } },
-});
+const newStep = type => (type === 'files' ? { type, files: [] } : type === 'check' ? { type, check: newCheck('exit') } : { type, command: '' });
+const blankDeployment = () => ({ id: null, name: 'New deployment', targets: [], parallel: false, steps: [] });
 
-// Stages that will actually run for a definition (mirrors deploy.js: empty stages are skipped).
-const dStagesOf = d => D_STAGES.filter(([k]) => k === 'files' ? d.files?.length
-  : (d.stages?.[k]?.commands || []).some(c => String(c).trim()) || (d.stages?.[k]?.checks || []).some(c =>
-    (c.type === 'port' && Number(c.port) > 0) || (c.type === 'log' && c.file && c.pattern) || (c.type === 'exit' && String(c.command || '').trim())));
+// Empty steps are skipped by the engine (deploy.js validStep); the builder dims them and the progress view leaves them out.
+const dCheckValid = c => !!c && ((c.type === 'port' && Number(c.port) > 0) || (c.type === 'log' && c.file && c.pattern) || (c.type === 'exit' && String(c.command || '').trim()));
+const dStepValid = st => (st.type === 'command' ? !!String(st.command || '').trim()
+  : st.type === 'check' ? dCheckValid(st.check) : !!st.files?.length);
+function dCheckLabel(c) {
+  if (c.type === 'port') return `TCP ${c.host || '<server>'}:${c.port || '?'} responds`;
+  if (c.type === 'log') return `${c.file || '<file>'} ${c.expect === 'absent' ? 'does not contain' : 'contains'} /${c.pattern || ''}/`;
+  return `\`${String(c.command || '').split('\n')[0]}\` exits ${Number(c.expectCode) || 0}`;
+}
+const dStepSummary = st => (!dStepValid(st) ? 'empty — skipped'
+  : st.type === 'command' ? String(st.command).trim().split('\n')[0]
+    : st.type === 'check' ? dCheckLabel(st.check) + (st.check.onFail === 'alert' ? ' (alert only)' : '')
+      : `${st.files.length} item${st.files.length === 1 ? '' : 's'} → ${[...new Set(st.files.map(f => f.remoteDir || '~'))].join(', ')}`);
 const D_ICON = { ok: '✓', warn: '!', failed: '✕', skipped: '–' };
 const D_FINAL = ['success', 'warning', 'failed', 'cancelled', 'skipped'];
 
@@ -56,8 +63,8 @@ function initDeployments(panel) {
       return el('li', {
         className: (d.id === (shown ? shown.dep.id : cur?.id) ? 'active' : '') + (r?.running ? ' running' : ''),
         onclick: () => (r?.running ? showStatus(r) : select(d)),
-      }, el('b', { textContent: d.name }),
-      el('small', { textContent: `${d.targets.length} server${d.targets.length === 1 ? '' : 's'} · ${d.files.length} file${d.files.length === 1 ? '' : 's'}` }),
+      }, el('div', { className: 'dltitle' }, el('b', { textContent: d.name }), r ? ring(r) : null),
+      el('small', { textContent: `${d.targets.length} server${d.targets.length === 1 ? '' : 's'} · ${d.steps.length} step${d.steps.length === 1 ? '' : 's'}` }),
       el('div', { className: 'dacts' },
         act('✎ Edit', 'Edit configuration', () => select(d)),
         r?.running ? act('■ Stop', 'Stop this run', () => api.deploy.cancel(r.id), 'stop')
@@ -66,6 +73,35 @@ function initDeployments(panel) {
         el('span', { className: 'grow' }),
         act('🗑', 'Delete deployment', () => remove(d), 'del')));
     }));
+  }
+  // Progress ring next to a deployment's name: live while running, then the last run's result.
+  function ring(r) {
+    const e = el('span', { className: 'dring' }, el('span', { className: 'dring-pct' }));
+    e.dataset.run = r.id;
+    paintRing(e, r);
+    return e;
+  }
+  // Same ring on the main side menu's Deployments item: live average of running deployments,
+  // otherwise the result of the run that finished last.
+  function paintNavRing() {
+    const all = [...runs.values()];
+    const live = all.filter(r => r.running);
+    const last = live.length ? null : all.filter(r => r.ended).sort((a, b) => b.ended - a.ended)[0];
+    const nav = $('#navDeploy');
+    let e = nav.querySelector('.dring');
+    if (!live.length && !last) return e?.remove();
+    if (!e) { e = el('span', { className: 'dring nav' }, el('span', { className: 'dring-pct' })); nav.append(e); }
+    const r = last || { running: true, pctVal: Math.round(live.reduce((n, x) => n + (x.pctVal || 0), 0) / live.length) };
+    paintRing(e, r);
+    e.classList.add('nav', 'lbl'); // lbl: hidden when the side menu is folded to icons
+    e.title = live.length ? `${live.length} deployment${live.length > 1 ? 's' : ''} running: ${r.pctVal}%` : `Last run (${last.dep.name}): ${last.state.textContent}`;
+  }
+  function paintRing(e, r) {
+    const pct = r.pctVal || 0;
+    e.className = 'dring ' + (r.running ? 'running' : r.result || '');
+    e.style.setProperty('--p', pct);
+    e.firstChild.textContent = pct + '%';
+    e.title = r.running ? `Running: ${pct}%` : `Last run: ${r.state?.textContent || ''}`;
   }
   // Leaving the editor: ask before throwing away edits.
   function leave() {
@@ -92,7 +128,7 @@ function initDeployments(panel) {
   panel.querySelector('.dnew').onclick = () => select(blankDeployment());
 
   // ---------- editor helpers ----------
-  const touch = () => { dirty = true; ed.querySelector('.dsave')?.classList.add('dirty'); };
+  const touch = () => { dirty = true; ed.querySelector('.dsave')?.classList.add('dirty'); ed.querySelector('.dflow')?.replaceWith(flowGraph(cur)); };
   const rerender = () => { touch(); renderEditor(); };
   function inp(obj, key, attrs = {}, tag = 'input') {
     const e = el(tag, attrs);
@@ -162,17 +198,50 @@ function initDeployments(panel) {
       })(), ' Run all servers in parallel'),
       hint('Sequential (default) deploys one server at a time and stops at the first failed server.'));
 
-    ed.replaceChildren(head, targets, ...D_STAGES.map(([key, title, text], i) =>
-      el('section', { className: 'dcard' },
-        el('header', {}, el('span', { className: 'dnum', textContent: i + 1 }), el('b', { textContent: title }), hint(`${text} Optional.`)),
-        key === 'files' ? filesBody(d) : stageBody(d.stages[key]))));
+    const add = el('div', { className: 'dstepadd' },
+      el('span', { className: 'muted', textContent: d.steps.length ? 'Add next step:' : 'Add the first step:' }),
+      ...Object.entries(D_TYPES).map(([type, t]) => el('button', { textContent: `＋ ${t.title}`, onclick: () => { d.steps.push(newStep(type)); rerender(); } })),
+      d.steps.length ? el('button', { textContent: '⧉ Repeat last step', title: 'Add a copy of the last step', onclick: () => { d.steps.push(structuredClone(d.steps.at(-1))); rerender(); } }) : null);
+    ed.replaceChildren(head, flowGraph(d), targets,
+      el('div', { className: 'dpipe' }, ...d.steps.map((st, i) => stepCard(d, st, i)), add));
   }
 
-  function filesBody(d) {
+  // Flow graphic: servers → each step (colored by type, dimmed when empty) → done. Click a step to jump to it.
+  function flowGraph(d) {
+    const node = (cls, icon, title, sub, onclick) => el('div', { className: 'dfnode ' + cls, title: sub, onclick },
+      el('span', { className: 'dficon', textContent: icon }), el('b', { textContent: title }), el('small', { textContent: sub }));
+    const arrow = () => el('span', { className: 'dfarrow', textContent: '→' });
+    const parts = [node('servers', '🖥', `${d.targets.length} server${d.targets.length === 1 ? '' : 's'}`, d.parallel ? 'in parallel' : 'one at a time')];
+    d.steps.forEach((st, i) => {
+      parts.push(arrow(), node(st.type + (dStepValid(st) ? '' : ' skip'), D_TYPES[st.type].icon, `${i + 1}. ${D_TYPES[st.type].short}`, dStepSummary(st),
+        () => ed.querySelector(`.dscard[data-i="${i}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })));
+    });
+    parts.push(arrow(), node('done', '🏁', 'Done', d.steps.length ? '' : 'add steps below'));
+    return el('div', { className: 'dflow' }, ...parts);
+  }
+
+  function stepCard(d, st, i) {
+    const t = D_TYPES[st.type];
+    const move = dir => { const j = i + dir; [d.steps[i], d.steps[j]] = [d.steps[j], d.steps[i]]; rerender(); };
+    const card = el('section', { className: `dcard dscard ${st.type}` + (dStepValid(st) ? '' : ' skip') },
+      el('header', {},
+        el('span', { className: 'dnum', textContent: i + 1 }),
+        el('b', { textContent: `${t.icon} ${t.title}` }),
+        el('span', { className: 'grow' }),
+        iconBtn('↑', 'Move up', () => move(-1), 'icon' + (i ? '' : ' ph')),
+        iconBtn('↓', 'Move down', () => move(1), 'icon' + (i < d.steps.length - 1 ? '' : ' ph')),
+        iconBtn('⧉', 'Duplicate this step', () => { d.steps.splice(i + 1, 0, structuredClone(st)); rerender(); }),
+        iconBtn('×', 'Remove step', () => { d.steps.splice(i, 1); rerender(); }, 'icon danger')),
+      st.type === 'files' ? filesBody(st) : st.type === 'check' ? checkBody(st) : commandBody(st));
+    card.dataset.i = i;
+    return card;
+  }
+
+  function filesBody(st) {
     const add = paths => {
       if (!paths?.length) return;
-      const dir = d.files.at(-1)?.remoteDir || '/tmp';
-      d.files.push(...paths.map(local => ({ local, remoteDir: dir })));
+      const dir = st.files.at(-1)?.remoteDir || '/tmp';
+      st.files.push(...paths.map(local => ({ local, remoteDir: dir })));
       rerender();
     };
     const drop = el('div', { className: 'ddrop' },
@@ -186,45 +255,32 @@ function initDeployments(panel) {
       add([...e.dataTransfer.files].map(f => api.pathForFile(f)).filter(Boolean));
     };
     return el('div', {},
-      ...d.files.map((f, i) => el('div', { className: 'drow' },
+      ...st.files.map((f, i) => el('div', { className: 'drow' },
         el('span', { className: 'mono dlocal', textContent: f.local, title: f.local }),
         el('span', { className: 'muted', textContent: '→' }),
         inp(f, 'remoteDir', { className: 'mono', placeholder: 'remote folder, e.g. /opt/app or ~/app' }),
-        iconBtn('×', 'Remove', () => { d.files.splice(i, 1); rerender(); }))),
-      drop);
+        iconBtn('×', 'Remove', () => { st.files.splice(i, 1); rerender(); }))),
+      drop, hint('Copied to every target server. Folders keep their structure.'));
   }
 
-  function stageBody(st) {
+  function commandBody(st) {
     const lib$ = el('select', { className: 'dlib' },
-      el('option', { value: '', textContent: '＋ From script library…' }),
+      el('option', { value: '', textContent: '⇩ From script library…' }),
       ...lib.map(x => el('option', { value: x.id, textContent: x.name })));
     lib$.onchange = () => {
       const x = lib.find(y => y.id === lib$.value);
-      if (x) { st.commands.push(x.command); rerender(); }
+      if (x) { st.command = st.command.trim() ? `${st.command.replace(/\n+$/, '')}\n${x.command}` : x.command; rerender(); }
     };
-    const addCheck = el('select', { className: 'dlib' },
-      el('option', { value: '', textContent: '＋ Verification…' }),
-      ...Object.entries(D_CHECKS).map(([value, textContent]) => el('option', { value, textContent })));
-    addCheck.onchange = () => { if (addCheck.value) { st.checks.push(newCheck(addCheck.value)); rerender(); } };
-
-    return el('div', { className: 'dstage' },
-      el('h6', { textContent: 'Commands' }),
-      ...st.commands.map((c, i) => {
-        const t = el('textarea', { className: 'mono', spellcheck: false, rows: Math.min(10, Math.max(1, c.split('\n').length)), placeholder: 'command, or a multi-line script (#!/bin/bash supported)' });
-        t.value = c;
-        t.oninput = () => { st.commands[i] = t.value; t.rows = Math.min(10, Math.max(1, t.value.split('\n').length)); touch(); };
-        return el('div', { className: 'drow' }, el('span', { className: 'dstep', textContent: `${i + 1}.` }), t,
-          iconBtn('×', 'Remove', () => { st.commands.splice(i, 1); rerender(); }));
-      }),
-      el('div', { className: 'dadd' },
-        el('button', { textContent: '＋ Command', onclick: () => { st.commands.push(''); rerender(); } }), lib$),
-      el('h6', { textContent: 'Verifications' }),
-      ...st.checks.map((c, i) => checkRow(st, c, i)),
-      el('div', { className: 'dadd' }, addCheck));
+    const t = el('textarea', { className: 'mono', spellcheck: false, rows: Math.min(12, Math.max(2, st.command.split('\n').length)), placeholder: 'command, or a multi-line script (#!/bin/bash supported)' });
+    t.value = st.command;
+    t.oninput = () => { st.command = t.value; t.rows = Math.min(12, Math.max(2, t.value.split('\n').length)); touch(); };
+    return el('div', { className: 'dstage' }, el('div', { className: 'drow' }, t), el('div', { className: 'dadd' }, lib$,
+      hint('A non-zero exit code fails this server.')));
   }
 
-  function checkRow(st, c, i) {
-    const type = sel(c, 'type', D_CHECKS, () => { st.checks[i] = newCheck(c.type, c.onFail); rerender(); });
+  function checkBody(st) {
+    const c = st.check;
+    const type = sel(c, 'type', D_CHECKS, () => { st.check = newCheck(c.type, c.onFail); rerender(); });
     let fields;
     if (c.type === 'log') {
       fields = [inp(c, 'file', { className: 'mono w2', placeholder: '/var/log/app.log' }),
@@ -246,8 +302,7 @@ function initDeployments(panel) {
       el('span', { className: 'muted', textContent: 'wait up to' }),
       inp(c, 'timeout', { type: 'number', min: 0, className: 'num', title: 'Retry every 2 s for up to this many seconds (0 = check once)' }),
       el('span', { className: 'muted', textContent: 's' }),
-      sel(c, 'onFail', { stop: 'If it fails: stop', alert: 'If it fails: alert only' }),
-      iconBtn('×', 'Remove', () => { st.checks.splice(i, 1); rerender(); }));
+      sel(c, 'onFail', { stop: 'If it fails: stop', alert: 'If it fails: alert only' }));
   }
 
   // ---------- save / delete ----------
@@ -300,9 +355,10 @@ function initDeployments(panel) {
   // ---------- status view ----------
   const fmtDur = ms => { const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`; };
   function buildStatus(run, targets) {
-    const stages = dStagesOf(run.dep);
     const multi = targets.length > 1;
-    const stepDefs = [['connect', 'Connect'], ...stages.map(([k, t]) => [k, t]), ['done', 'Done']];
+    const stepDefs = [['connect', 'Connect', ''],
+      ...run.dep.steps.map((st, i) => [`s${i}`, `${D_TYPES[st.type].icon} ${D_TYPES[st.type].short}`, `${i + 1}. ${dStepSummary(st)}`, st]).filter(x => dStepValid(x[3])),
+      ['done', 'Done', '']];
     run.bar = el('div', { className: 'dprog-fill' });
     run.pct = el('b', { className: 'dprog-pct', textContent: '0%' });
     run.state = el('span', { className: 'dbadge running', textContent: 'Running' });
@@ -313,9 +369,9 @@ function initDeployments(panel) {
     run.multi = multi;
 
     const rows = targets.map(t => {
-      const steps = Object.fromEntries(stepDefs.map(([k, title], i) => {
+      const steps = Object.fromEntries(stepDefs.map(([k, title, tip], i) => {
         const dot = el('span', { className: 'dsdot', textContent: i + 1 });
-        const node = el('div', { className: 'dstep2 pending' }, dot, el('small', { textContent: title }));
+        const node = el('div', { className: 'dstep2 pending', title: tip }, dot, el('small', { textContent: title }));
         return [k, { node, dot, num: i + 1, state: 'pending' }];
       }));
       const badge = el('span', { className: 'dbadge pending', textContent: D_STATUS.pending });
@@ -359,6 +415,10 @@ function initDeployments(panel) {
     const pct = Math.round((sum / run.targets.size) * 100);
     run.bar.style.width = pct + '%';
     run.pct.textContent = pct + '%';
+    run.pctVal = pct;
+    const rg = listEl.querySelector(`.dring[data-run="${run.id}"]`);
+    if (rg) paintRing(rg, run);
+    paintNavRing();
     const st = [...run.targets.values()].map(t => t.status);
     run.bar.className = 'dprog-fill' + (st.includes('failed') || st.includes('cancelled') ? ' failed' : st.includes('warning') ? ' warn' : '');
   }
@@ -399,6 +459,7 @@ function initDeployments(panel) {
         : states.includes('cancelled') ? 'Cancelled' : states.includes('warning') ? 'Finished with alerts' : 'All servers succeeded';
       const cls = failed || states.includes('cancelled') ? 'failed' : states.includes('warning') ? 'warning' : 'success';
       run.state.className = `dbadge ${cls}`;
+      run.result = cls;
       run.state.textContent = summary;
       run.stopBtn.hidden = true;
       run.againBtn.hidden = false;

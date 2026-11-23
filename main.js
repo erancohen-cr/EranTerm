@@ -13,7 +13,7 @@ const { METRICS_CMD, parseMetrics, TOP_CMD, parseTop } = require('./metrics');
 const { killCmd, DROP_CACHES_CMD, SCAN_CMD, parseScan, cleanCmd } = require('./maint');
 const winlogs = require('./winlogs');
 const { shq, buildRdp, remoteDir, AI_PROVIDERS, validModel, normModel, buildAiRequest, parseAiResponse, buildModelsRequest, parseModels, hostKeyDecision } = require('./util');
-const { runDeployment } = require('./deploy');
+const { runDeployment, toSteps } = require('./deploy');
 
 const rpath = path.posix;
 
@@ -22,6 +22,11 @@ const rpath = path.posix;
 // Also keeps the same data folder. The visible name (window, menu, installer) is still EranTerm.
 app.setName('EraTerm');
 app.setPath('userData', path.join(app.getPath('appData'), 'EraTerm'));
+// Everything the user sees says EranTerm: logs folder, macOS app menu (labels set in buildMenu), About panel.
+const OLD_LOGS = app.getPath('logs');
+app.setAppLogsPath(isMacPlatform() ? path.join(os.homedir(), 'Library', 'Logs', 'EranTerm') : path.join(app.getPath('userData'), 'logs'));
+app.setAboutPanelOptions({ applicationName: 'EranTerm' });
+function isMacPlatform() { return process.platform === 'darwin'; }
 
 // ponytail: JSON files in userData; move to SQLite if the server list gets large.
 const dataFile = name => path.join(app.getPath('userData'), name);
@@ -102,7 +107,13 @@ function showVersion() {
 }
 function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    ...(process.platform === 'darwin' ? [{ role: 'appMenu', label: 'EranTerm' }] : []),
+    // Explicit labels: the role defaults use the internal app name ("Quit EraTerm").
+    ...(process.platform === 'darwin' ? [{ label: 'EranTerm', submenu: [
+      { role: 'about', label: 'About EranTerm' }, { type: 'separator' },
+      { role: 'services' }, { type: 'separator' },
+      { role: 'hide', label: 'Hide EranTerm' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' },
+      { role: 'quit', label: 'Quit EranTerm' },
+    ] }] : []),
     { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
     { role: 'help', submenu: [
       { label: `Version ${app.getVersion()}`, click: showVersion },
@@ -245,8 +256,11 @@ const GROUP_RESERVED = 'Ungrouped';
 const groupList = () => readJson('groups.json', []);
 const cleanGroup = n => String(n || '').trim().slice(0, 100);
 ipcMain.handle('groups:list', () => groupList());
-// save(old, name): old empty = create; otherwise rename (members follow). Returns the saved name.
-ipcMain.handle('groups:save', (_e, oldName, name) => {
+// Optional color per group (gentle palette picked in the renderer): group_colors.json { name: '#rrggbb' }.
+const groupColors = () => readJson('group_colors.json', {});
+ipcMain.handle('groups:colors', () => groupColors());
+// save(old, name, color): old empty = create; otherwise rename (members follow). Returns the saved name.
+ipcMain.handle('groups:save', (_e, oldName, name, color) => {
   const old = cleanGroup(oldName), next = cleanGroup(name);
   if (!next) throw new Error('Group name is required');
   if (next.toLowerCase() === GROUP_RESERVED.toLowerCase()) throw new Error(`"${GROUP_RESERVED}" is reserved`);
@@ -254,6 +268,10 @@ ipcMain.handle('groups:save', (_e, oldName, name) => {
   if (next !== old && taken.has(next)) throw new Error(`A group named "${next}" already exists`);
   writeJson('groups.json', [...new Set([...groupList().filter(g => g !== old), next])]);
   if (old) writeJson('servers.json', servers().map(s => (s.group === old ? { ...s, group: next } : s)));
+  const colors = groupColors();
+  delete colors[old];
+  if (/^#[0-9a-f]{6}$/i.test(color || '')) colors[next] = color; else delete colors[next];
+  writeJson('group_colors.json', colors);
   return next;
 });
 // Deleting a group keeps its servers: they move to Ungrouped.
@@ -261,6 +279,8 @@ ipcMain.handle('groups:delete', (_e, name) => {
   const n = cleanGroup(name);
   writeJson('groups.json', groupList().filter(g => g !== n));
   writeJson('servers.json', servers().map(s => (s.group === n ? { ...s, group: '' } : s)));
+  const colors = groupColors();
+  if (delete colors[n]) writeJson('group_colors.json', colors);
 });
 
 // ---------- settings ----------
@@ -283,7 +303,8 @@ ipcMain.handle('settings:setAutoUpdate', (_e, on) => {
 // Log to file: { logToFile, logDir }. Default off; folder defaults to the OS log folder.
 const logSettings = () => {
   const st = readJson('settings.json', {});
-  return { logToFile: !!st.logToFile, logDir: st.logDir || app.getPath('logs') };
+  // A saved folder equal to the old default (…/EraTerm logs) follows the new default.
+  return { logToFile: !!st.logToFile, logDir: st.logDir && st.logDir !== OLD_LOGS ? st.logDir : app.getPath('logs') };
 };
 ipcMain.handle('settings:setLog', (_e, { logToFile, logDir }) => {
   logDir = String(logDir || '').trim() || app.getPath('logs');
@@ -826,18 +847,22 @@ async function sftpPutDir(sftp, local, remoteParent, prog) {
 }
 
 // ---------- deployments ----------
-const deployments = () => readJson('deployments.json', []);
-const cleanDeployment = d => ({
-  id: d.id || crypto.randomUUID(),
-  name: String(d.name || 'Untitled deployment').slice(0, 200),
-  targets: (d.targets || []).map(String),
-  parallel: !!d.parallel,
-  files: (d.files || []).map(f => ({ local: String(f.local), remoteDir: String(f.remoteDir || '') })),
-  stages: Object.fromEntries(['pre', 'deploy', 'post'].map(k => [k, {
-    commands: (d.stages?.[k]?.commands || []).map(String),
-    checks: (d.stages?.[k]?.checks || []).map(c => ({ ...c })),
-  }])),
-});
+// Older saves (fixed pre/files/deploy/post stages) come back as steps; they are rewritten on the next save.
+const deployments = () => readJson('deployments.json', []).map(cleanDeployment);
+const STEP_TYPES = ['command', 'check', 'files'];
+const cleanStep = st => (st.type === 'files'
+  ? { type: 'files', files: (st.files || []).map(f => ({ local: String(f.local), remoteDir: String(f.remoteDir || '') })) }
+  : st.type === 'check' ? { type: 'check', check: { ...(st.check || {}) } }
+    : { type: 'command', command: String(st.command || '') });
+function cleanDeployment(d) {
+  return {
+    id: d.id || crypto.randomUUID(),
+    name: String(d.name || 'Untitled deployment').slice(0, 200),
+    targets: (d.targets || []).map(String),
+    parallel: !!d.parallel,
+    steps: toSteps(d).filter(st => STEP_TYPES.includes(st.type)).map(cleanStep),
+  };
+}
 
 ipcMain.handle('deploy:list', () => deployments());
 ipcMain.handle('deploy:save', (_e, d) => {

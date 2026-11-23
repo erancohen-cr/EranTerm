@@ -95,8 +95,38 @@ function show(id) {
 }
 $('#homeTab').onclick = () => show('home');
 
+// Server tab + page header follow the server's group (name chip, gentle color). Re-run when groups change.
+function paintTabs() {
+  for (const [sid, v] of views) {
+    const g = servers.find(x => x.id === sid)?.group || '';
+    tintGroup(v.tabEl, g);
+    v.tabEl.title = g ? `Group: ${g}` : '';
+    const chip = v.root.querySelector('.sgroup');
+    chip.textContent = g ? `▣ ${g}` : '';
+    chip.hidden = !g;
+    tintGroup(chip, g);
+  }
+}
+
+// Drag server tabs to reorder them (Home stays first).
+let dragTab = null;
+$('#tabs').addEventListener('dragstart', e => {
+  dragTab = e.target.closest?.('.tab[data-sid]');
+  if (!dragTab) return e.preventDefault();
+  e.dataTransfer.effectAllowed = 'move';
+  dragTab.classList.add('dragging');
+});
+$('#tabs').addEventListener('dragover', e => {
+  const over = e.target.closest?.('.tab[data-sid]');
+  if (!dragTab || !over || over === dragTab) return;
+  e.preventDefault();
+  const r = over.getBoundingClientRect();
+  over[e.clientX < r.left + r.width / 2 ? 'before' : 'after'](dragTab);
+});
+$('#tabs').addEventListener('dragend', () => { dragTab?.classList.remove('dragging'); dragTab = null; });
+
 // ================= home: servers, groups, users =================
-let servers = [], users = [], savedGroups = [];
+let servers = [], users = [], savedGroups = [], groupColors = {};
 let homeMode = 'all'; // 'all' | 'fav' | 'users' | 'group:<name>'
 const UNGROUPED = 'Ungrouped';
 const groupOf = s => s.group || UNGROUPED;
@@ -106,8 +136,9 @@ try { collapsed = new Set(JSON.parse(localStorage.getItem('collapsedGroups')) ||
 const saveCollapsed = () => { try { localStorage.setItem('collapsedGroups', JSON.stringify([...collapsed])); } catch { /* ignore */ } };
 
 async function refreshServers() {
-  [servers, users, savedGroups] = await Promise.all([api.servers.list(), api.users.list(), api.groups.list()]);
+  [servers, users, savedGroups, groupColors] = await Promise.all([api.servers.list(), api.users.list(), api.groups.list(), api.groups.colors()]);
   renderNav();
+  paintTabs();
   renderServers();
   renderUsers();
 }
@@ -135,11 +166,11 @@ function renderNav() {
   $('#navFav').classList.toggle('active', homeMode === 'fav');
   $('#navUsers').classList.toggle('active', homeMode === 'users');
   $('#navDeploy').classList.toggle('active', homeMode === 'deploy');
-  $('#navGroups').replaceChildren(...groupNames().map(name => el('button', {
-    className: 'navitem' + (g === name ? ' active' : ''), title: name, onclick: () => setMode('group:' + name),
+  $('#navGroups').replaceChildren(...groupNames().map(name => tintGroup(el('button', {
+    className: 'navitem' + (g === name ? ' active' : ''), title: name, onclick: () => setMode(g === name ? 'all' : 'group:' + name), // click again = back to All Servers
   }, el('i', { textContent: name === UNGROUPED ? '◌' : '▣' }), el('span', { className: 'lbl', textContent: name }),
   el('span', { className: 'count lbl', textContent: servers.filter(s => groupOf(s) === name).length }),
-  ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name), 'icon gedit lbl')]))));
+  ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name), 'icon gedit lbl')])), name === UNGROUPED ? '' : name)));
   $('#serversView').hidden = homeMode === 'users' || homeMode === 'deploy';
   $('#usersView').hidden = homeMode !== 'users';
   $('#deployView').hidden = homeMode !== 'deploy';
@@ -200,7 +231,7 @@ async function openMetrics(s) {
 // ---- availability (probed in main, pushed every interval) ----
 // Painted in place (data-av="<serverId>:<server|ssh|desk>") so a refresh never rebuilds the table.
 let avail = {};
-const AV_TEXT = { up: 'available', down: 'not available', unknown: 'unknown' };
+const AV_NAME = { server: 'Server', ssh: 'SSH', desk: 'Desktop' };
 const avMark = (id, key) => {
   const e = el('span', { className: 'av' });
   e.dataset.av = `${id}:${key}`;
@@ -211,14 +242,17 @@ const withAv = (btn, id, key) => {
   btn.replaceChildren(el('span', { className: 'blbl', textContent: btn.textContent }), avMark(id, key));
   return btn;
 };
+// Green = answered, red = failed check (refused or no answer), grey = not checked yet / checking off.
 function paintAvail() {
   for (const e of document.querySelectorAll('[data-av]')) {
     const [id, key] = e.dataset.av.split(':');
-    const st = avail[id]?.[key] || '';
-    e.className = 'av' + (st ? ' ' + st : '');
-    e.textContent = key !== 'server' && st === 'unknown' ? 'unknown' : '';
-    e.title = st ? `${key === 'server' ? 'Server' : key === 'ssh' ? 'SSH' : 'Desktop'}: ${AV_TEXT[st]} · checked ${new Date(avail[id].at).toLocaleTimeString()}`
-      : 'Availability not checked (off in Settings or for this server)';
+    const a = avail[id];
+    const st = !a ? 'none' : a[key] === 'up' ? 'up' : 'down';
+    e.className = 'av ' + st;
+    const tip = !a ? `${AV_NAME[key]}: not checked yet (or checking is off in Settings / for this server)`
+      : `${AV_NAME[key]}: ${st === 'up' ? 'available' : 'not available'} · checked ${new Date(a.at).toLocaleString()}`;
+    if (key === 'server') e.dataset.tip = tip; // State column: instant CSS tooltip (native title waits ~2 s)
+    else e.title = tip;
   }
 }
 // OS popup (HTML5 Notification = native notification in Electron). Off in Settings → notifications.
@@ -244,7 +278,8 @@ api.avail.get().then(a => { avail = a; paintAvail(); });
 
 function serverRow(s) {
   const tr = el('tr', { className: 'srow' + (alertState.get(s.id)?.size ? ' alerting' : '') },
-    el('td', {}, el('span', { className: 'dot' + (views.has(s.id) ? ' on' : '') }), el('b', { textContent: s.name }), avMark(s.id, 'server')),
+    el('td', { className: 'state' }, avMark(s.id, 'server')),
+    el('td', {}, el('b', { textContent: s.name })),
     el('td', {}, el('span', { className: 'proto ' + typeOf(s), textContent: typeOf(s).toUpperCase() })),
     el('td', { className: 'mono', title: s.userLabel ? `Login: saved user "${s.userLabel}"` : '' },
       `${s.username ? s.username + '@' : ''}${s.host}` + (s.port !== defaultPort(s) ? `:${s.port}` : ''),
@@ -277,14 +312,14 @@ function renderServers() {
   $('#countBadge').textContent = `${list.length} server${list.length === 1 ? '' : 's'}`;
   $('#homeTitle').textContent = g || (homeMode === 'fav' ? 'Favorites' : 'All Servers');
   const rows = [];
-  for (const name of groupNames()) {
+  for (const name of g ? [g] : groupNames()) { // a selected group shows only itself, not the others as empty
     const members = list.filter(s => groupOf(s) === name);
     if (!members.length && (q || homeMode === 'fav')) continue; // empty groups show only when not filtering
     const shut = !q && collapsed.has(name); // searching always shows matches
     rows.push(el('tr', {
       className: 'grprow' + (shut ? ' shut' : ''),
       onclick: () => { collapsed[collapsed.has(name) ? 'delete' : 'add'](name); saveCollapsed(); renderServers(); },
-    }, el('td', { colSpan: 8 },
+    }, el('td', { colSpan: 9 },
       el('span', { className: 'caret', textContent: shut ? '▸' : '▾' }),
       el('b', { textContent: name }),
       el('span', { className: 'count', textContent: members.length }),
@@ -292,6 +327,7 @@ function renderServers() {
       el('span', { className: 'gacts' },
         ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name))]),
         iconBtn('＋', `Add a server to ${name}`, () => editServer({ group: name === UNGROUPED ? '' : name }))))));
+    tintGroup(rows.at(-1), name === UNGROUPED ? '' : name);
     if (!shut) rows.push(...members.map(serverRow));
   }
   $('#serverRows').replaceChildren(...rows);
@@ -299,6 +335,11 @@ function renderServers() {
   $('#emptyHome').hidden = servers.length > 0;
 }
 // ---- groups: new / rename / delete ----
+// Gentle (muted pastel) colors: readable as text tint and as a soft background in both themes.
+const GROUP_PALETTE = ['#8fb3d9', '#8fc9a8', '#d9c48f', '#d9a38f', '#d98fa8', '#b39fd9', '#8fcfcf', '#b8c98f'];
+const groupColor = g => (g && groupColors[g]) || '';
+// Tint an element with a group color (CSS uses --gc); no color = untouched.
+const tintGroup = (e, g) => { const c = groupColor(g); e.classList.toggle('gc', !!c); if (c) e.style.setProperty('--gc', c); else e.style.removeProperty('--gc'); return e; };
 function editGroup(name = '') {
   const dlg = $('#groupDlg'), f = $('#groupForm');
   $('#groupTitle').textContent = name ? 'Edit group' : 'New group';
@@ -306,12 +347,21 @@ function editGroup(name = '') {
   const n = servers.filter(s => s.group === name).length;
   $('#groupInfo').textContent = name ? `${n} server${n === 1 ? '' : 's'} in this group.` : '';
   f.querySelector('.gdel').hidden = !name;
+  let color = groupColors[name] || '';
+  const paintSw = () => $('#groupColors').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.c === color));
+  $('#groupColors').replaceChildren(...['', ...GROUP_PALETTE].map(c => {
+    const b = el('button', { type: 'button', className: 'sw' + (c ? '' : ' none'), title: c || 'No color', onclick: () => { color = c; paintSw(); } });
+    b.dataset.c = c;
+    if (c) b.style.background = c;
+    return b;
+  }));
+  paintSw();
   dlg.returnValue = '';
   dlg.showModal();
   dlg.addEventListener('close', async () => {
     try {
       if (dlg.returnValue === 'save') {
-        const next = await api.groups.save(name, f.elements.name.value);
+        const next = await api.groups.save(name, f.elements.name.value, color);
         if (name && next !== name) {
           if (collapsed.delete(name)) { collapsed.add(next); saveCollapsed(); }
           if (modeGroup() === name) homeMode = 'group:' + next;
@@ -559,6 +609,7 @@ $('#logPick').onclick = async () => {
 $('#logOpen').onclick = () => api.log.openFolder();
 $('#logConsole').onclick = () => api.log.openConsole();
 $('#settingsBtn').onclick = () => openSettings();
+$('#consoleBtn').onclick = () => api.log.openConsole();
 
 // Confirm / small form dialog. body: string or element(s). Resolves true on OK.
 function ask({ title, body, ok = 'OK', danger = false, okDisabled = false }) {
@@ -836,15 +887,17 @@ async function openServer(s) {
   const root = $('#serverTpl').content.firstElementChild.cloneNode(true);
   const q = sel => root.querySelector(sel);
   $('#views').append(root);
-  const tabEl = el('button', { className: 'tab', onclick: () => show(s.id) },
+  const tabEl = el('button', { className: 'tab', draggable: true, onclick: () => show(s.id) },
     el('span', { textContent: '▤ ' + s.name }),
     el('span', { className: 'x', textContent: '×', title: 'Disconnect', onclick: e => { e.stopPropagation(); closeServer(s.id); } }));
   $('#tabs').append(tabEl);
 
+  tabEl.dataset.sid = s.id;
   const v = { root, tabEl, connId: null, panel: 'files' };
   views.set(s.id, v);
 
   q('.sname').textContent = s.name;
+  paintTabs();
   q('.saddr').textContent = typeOf(s) === 'rdp' // the server page is the SSH side of an RDP entry
     ? `${s.domain ? s.domain + '\\' : ''}${s.username}@${s.host}:${s.sshPort || 22} (SSH)`
     : `${s.username}@${s.host}:${s.port}`;

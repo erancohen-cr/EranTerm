@@ -25,6 +25,7 @@
         <h6 class="lbl navhead">Groups <button id="newGroupBtn" class="icon" title="New group">＋</button></h6>
         <div id="navGroups" class="navgroups"></div>
         <span class="grow"></span>
+        <button class="navitem" id="consoleBtn" title="Debug Console (Ctrl/⌘ + Shift + L)"><i>›_</i><span class="lbl">Console</span></button>
         <button class="navitem" id="settingsBtn" title="Settings"><i>⚙</i><span class="lbl">Settings</span></button>
       </aside>
       <div class="content">
@@ -37,7 +38,7 @@
             <input id="filter" class="search" placeholder="Search servers, IPs, users, tags…">
           </header>
           <table class="grid">
-            <thead><tr><th>Server</th><th>Type</th><th>Connection</th><th>Tags</th><th>Details</th><th>Alerts</th><th>Last seen</th><th class="r">Actions</th></tr></thead>
+            <thead><tr><th class="state">State</th><th>Server</th><th>Type</th><th>Connection</th><th>Tags</th><th>Details</th><th>Alerts</th><th>Last seen</th><th class="r">Actions</th></tr></thead>
             <tbody id="serverRows"></tbody>
           </table>
           <p id="emptyHome" class="empty">No servers yet. Click “New connection” to add one.</p>
@@ -76,7 +77,7 @@
     <section class="view server">
       <header class="srvhead">
         <button class="back icon" title="Back to Home">←</button>
-        <div class="srvid"><b class="sname"></b><small class="saddr mono"></small><small class="sdetails"></small></div>
+        <div class="srvid"><small class="sgroup" hidden></small><b class="sname"></b><small class="saddr mono"></small><small class="sdetails"></small></div>
         <span class="grow"></span>
         <span class="metrics mono">CPU <b class="mCpu">—</b> · Mem <b class="mMem">—</b> · Disk <b class="mDisk">—</b></span>
         <button class="status">CONNECTING…</button>
@@ -377,6 +378,7 @@
     <form method="dialog" id="groupForm">
       <h3 id="groupTitle"></h3>
       <label>Name <input name="name" required maxlength="100" autocomplete="off" placeholder="e.g. Production"></label>
+      <label>Color <span id="groupColors" class="swatches"></span></label>
       <p id="groupInfo" class="muted"></p>
       <menu><button value="delete" class="gdel danger-btn" formnovalidate>Delete</button><span class="grow"></span><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary">Save</button></menu>
     </form>

@@ -13,7 +13,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   groups: {
     list: () => ipcRenderer.invoke('groups:list'),
-    save: (oldName, name) => ipcRenderer.invoke('groups:save', oldName, name),
+    save: (oldName, name, color) => ipcRenderer.invoke('groups:save', oldName, name, color),
+    colors: () => ipcRenderer.invoke('groups:colors'),
     delete: name => ipcRenderer.invoke('groups:delete', name),
   },
   users: {
