@@ -684,6 +684,8 @@ const cleanScript = sc => ({
   description: String(sc.description || '').slice(0, 500),
   command: String(sc.command || ''),
   tags: cleanTags(sc.tags),
+  root: !!sc.root,
+  confirm: !!sc.confirm,
 });
 const userScripts = () => {
   const st = readJson('settings.json', {});
@@ -1091,7 +1093,8 @@ function cursorRun(args, key, timeoutMs = 120000) {
   });
 }
 const cursorAsk = (key, model, system, content) =>
-  cursorRun(['-p', '--output-format', 'text', '--model', model, `${system}\n\n${content}`], key);
+  // --trust: headless runs otherwise stop on "Workspace Trust Required" for the temp-dir cwd.
+  cursorRun(['-p', '--trust', '--output-format', 'text', '--model', model, `${system}\n\n${content}`], key);
 const cursorModels = async key => {
   const ids = parseCliModels(await cursorRun(['models'], key, 30000).catch(() => cursorRun(['--list-models'], key, 30000)));
   if (!ids.length) throw new Error('Cursor CLI listed no models (type a model id, or use "auto").');
