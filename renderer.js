@@ -462,6 +462,7 @@ async function toggleStar(s) {
 function editServer(s = {}) {
   const f = $('#serverForm');
   f.reset();
+  f.elements.id.value = ''; // reset() keeps hidden inputs: a stale id turned "Add" into overwriting the last edited server
   for (const k of ['id', 'name', 'host', 'port', 'username', 'keyPath', 'group']) if (s[k] != null) f.elements[k].value = s[k];
   f.elements.type.value = typeOf(s);
   f.elements.domain.value = s.domain || '';
@@ -505,13 +506,15 @@ $('#serverForm').elements.username.onchange = () => {
 $('#serverDlg').addEventListener('close', async () => {
   if ($('#serverDlg').returnValue !== 'save') return;
   const e = $('#serverForm').elements;
-  await api.servers.save({
-    id: e.id.value || undefined, type: e.type.value, domain: e.domain.value.trim(), sshPort: e.sshPort.value,
-    name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, userId: e.userId.value,
-    username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
-    tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
-    details: e.details.value, noProbe: !e.probe.checked,
-  });
+  try {
+    await api.servers.save({
+      id: e.id.value || undefined, type: e.type.value, domain: e.domain.value.trim(), sshPort: e.sshPort.value,
+      name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, userId: e.userId.value,
+      username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
+      tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
+      details: e.details.value, noProbe: !e.probe.checked,
+    });
+  } catch (err) { toast(`Save failed: ${cleanErr(err)}`, true); }
   refreshServers();
 });
 
@@ -1052,6 +1055,13 @@ async function openServer(s) {
   let sortMode = 'manual';
   try { sortMode = localStorage.getItem('scriptSort') || 'manual'; } catch { /* default */ }
   q('.sc-sort').value = sortMode;
+  try { q('.sc-hidebuiltin').checked = localStorage.getItem('scriptHideBuiltin') === '1'; } catch { /* default */ }
+  q('.sc-hidebuiltin').onchange = () => {
+    try { localStorage.setItem('scriptHideBuiltin', q('.sc-hidebuiltin').checked ? '1' : ''); } catch { /* ignore */ }
+    renderScripts();
+  };
+  // built-ins carry the 'built-in' tag; removing that tag makes one count as the user's
+  const shown = () => (q('.sc-hidebuiltin').checked ? scripts.filter(x => !(x.tags || []).includes('built-in')) : scripts);
   const lastRun = () => { try { return JSON.parse(localStorage.getItem('scriptLastRun')) || {}; } catch { return {}; } };
 
   async function loadScripts() {
@@ -1062,7 +1072,7 @@ async function openServer(s) {
 
   function renderTags() {
     const counts = new Map();
-    for (const x of scripts) for (const t of x.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
+    for (const x of shown()) for (const t of x.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
     for (const t of activeTags) if (!counts.has(t)) activeTags.delete(t);
     q('.sc-tags').replaceChildren(
       ...[...counts.keys()].sort().map(t => el('button', {
@@ -1074,7 +1084,7 @@ async function openServer(s) {
   function renderScripts() {
     renderTags();
     const f = q('.sc-filter').value.toLowerCase();
-    let list = scripts
+    let list = shown()
       .filter(x => !f || `${x.name} ${x.description} ${x.command} ${(x.tags || []).join(' ')}`.toLowerCase().includes(f))
       .filter(x => !activeTags.size || (x.tags || []).some(t => activeTags.has(t)));
     if (sortMode === 'name') list = [...list].sort((a, b) => a.name.localeCompare(b.name));
