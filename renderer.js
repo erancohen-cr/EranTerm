@@ -462,6 +462,7 @@ async function toggleStar(s) {
 function editServer(s = {}) {
   const f = $('#serverForm');
   f.reset();
+  f.elements.id.value = ''; // reset() keeps hidden inputs: a stale id turned "Add" into overwriting the last edited server
   for (const k of ['id', 'name', 'host', 'port', 'username', 'keyPath', 'group']) if (s[k] != null) f.elements[k].value = s[k];
   f.elements.type.value = typeOf(s);
   f.elements.domain.value = s.domain || '';
@@ -505,13 +506,15 @@ $('#serverForm').elements.username.onchange = () => {
 $('#serverDlg').addEventListener('close', async () => {
   if ($('#serverDlg').returnValue !== 'save') return;
   const e = $('#serverForm').elements;
-  await api.servers.save({
-    id: e.id.value || undefined, type: e.type.value, domain: e.domain.value.trim(), sshPort: e.sshPort.value,
-    name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, userId: e.userId.value,
-    username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
-    tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
-    details: e.details.value, noProbe: !e.probe.checked,
-  });
+  try {
+    await api.servers.save({
+      id: e.id.value || undefined, type: e.type.value, domain: e.domain.value.trim(), sshPort: e.sshPort.value,
+      name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, userId: e.userId.value,
+      username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
+      tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
+      details: e.details.value, noProbe: !e.probe.checked,
+    });
+  } catch (err) { toast(`Save failed: ${cleanErr(err)}`, true); }
   refreshServers();
 });
 
