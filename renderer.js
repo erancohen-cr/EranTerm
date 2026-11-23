@@ -1052,6 +1052,13 @@ async function openServer(s) {
   let sortMode = 'manual';
   try { sortMode = localStorage.getItem('scriptSort') || 'manual'; } catch { /* default */ }
   q('.sc-sort').value = sortMode;
+  try { q('.sc-hidebuiltin').checked = localStorage.getItem('scriptHideBuiltin') === '1'; } catch { /* default */ }
+  q('.sc-hidebuiltin').onchange = () => {
+    try { localStorage.setItem('scriptHideBuiltin', q('.sc-hidebuiltin').checked ? '1' : ''); } catch { /* ignore */ }
+    renderScripts();
+  };
+  // built-ins carry the 'built-in' tag; removing that tag makes one count as the user's
+  const shown = () => (q('.sc-hidebuiltin').checked ? scripts.filter(x => !(x.tags || []).includes('built-in')) : scripts);
   const lastRun = () => { try { return JSON.parse(localStorage.getItem('scriptLastRun')) || {}; } catch { return {}; } };
 
   async function loadScripts() {
@@ -1062,7 +1069,7 @@ async function openServer(s) {
 
   function renderTags() {
     const counts = new Map();
-    for (const x of scripts) for (const t of x.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
+    for (const x of shown()) for (const t of x.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
     for (const t of activeTags) if (!counts.has(t)) activeTags.delete(t);
     q('.sc-tags').replaceChildren(
       ...[...counts.keys()].sort().map(t => el('button', {
@@ -1074,7 +1081,7 @@ async function openServer(s) {
   function renderScripts() {
     renderTags();
     const f = q('.sc-filter').value.toLowerCase();
-    let list = scripts
+    let list = shown()
       .filter(x => !f || `${x.name} ${x.description} ${x.command} ${(x.tags || []).join(' ')}`.toLowerCase().includes(f))
       .filter(x => !activeTags.size || (x.tags || []).some(t => activeTags.has(t)));
     if (sortMode === 'name') list = [...list].sort((a, b) => a.name.localeCompare(b.name));
