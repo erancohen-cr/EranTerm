@@ -1,4 +1,4 @@
-/* global api, el, $, iconBtn, toast, cleanErr, servers, notify */
+/* global api, el, $, iconBtn, toast, cleanErr, servers, notify, fillVars */
 // Deployments panel: edit saved deployments, run them on many servers, watch per-server progress.
 // Runs happen in main (deploy.js); this file only edits definitions and renders events.
 
@@ -39,19 +39,37 @@ const D_ICON = { ok: '✓', warn: '!', failed: '✕', skipped: '–' };
 const D_FINAL = ['success', 'warning', 'failed', 'cancelled', 'skipped'];
 
 function initDeployments(panel) {
-  let list = [], cur = null, dirty = false, lib = [];
-  let shown = null; // run whose status view is on screen
+  let list = [], cur = null, dirty = false, lib = [], libVars = {};
+  let viewId = null; // deployment whose summary (and last run) is on screen; editing uses `cur`
   const tFilter = { group: null, q: '' }; // target-server filter (view only, not saved)
   const runs = new Map(); // deploymentId -> last run (kept so its status can be reopened)
   const listEl = panel.querySelector('.dl');
   const ed = panel.querySelector('.deditor');
 
+  // ---------- history (kept in this app's local storage: newest first, last 50 runs) ----------
+  const histGet = () => { try { return JSON.parse(localStorage.getItem('deployHistory')) || []; } catch { return []; } };
+  const histSet = h => { try { localStorage.setItem('deployHistory', JSON.stringify(h.slice(0, 50))); } catch { /* storage full: history just isn't kept */ } };
+  function renderHistory() {
+    const h = histGet();
+    panel.querySelector('.dh-list').replaceChildren(...(h.length ? h.map(x => {
+      const log = el('pre', { className: 'dcon mono', hidden: true, textContent: x.log || '(no output)' });
+      return el('li', { onclick: () => { log.hidden = !log.hidden; } },
+        el('div', { className: 'dltitle' }, el('b', { textContent: x.name }), el('span', { className: `dbadge ${x.result}`, textContent: x.summary })),
+        el('small', { textContent: `${new Date(x.started).toLocaleString()} · ${fmtDur(x.ended - x.started)}` }),
+        el('small', { className: 'mono', textContent: x.targets.map(t => `${t.name}: ${D_STATUS[t.status] || t.status}`).join(' · ') }),
+        log);
+    }) : [el('li', { className: 'empty', textContent: 'No runs yet.' })]));
+  }
+  panel.querySelector('.dh-clear').onclick = () => { if (confirm('Clear the deployments history?')) { histSet([]); renderHistory(); } };
+
   // ---------- list ----------
   async function load(selectId) {
-    try { [list, lib] = await Promise.all([api.deploy.list(), api.scripts.list()]); } catch (e) { toast(cleanErr(e), true); }
+    try { [list, lib, libVars] = await Promise.all([api.deploy.list(), api.scripts.list(), api.scripts.globals()]); } catch (e) { toast(cleanErr(e), true); }
     const pick = list.find(d => d.id === selectId);
-    if (pick) select(pick, true);
-    else if (!cur && !shown) renderEmpty();
+    if (pick) view(pick, true);
+    else if (!cur && !viewId) renderEmpty();
+    else if (viewId && !list.some(x => x.id === viewId)) renderEmpty();
+    else if (viewId && !cur) view(list.find(x => x.id === viewId), true); // refresh the summary
     renderList();
   }
   function renderList() {
@@ -61,17 +79,17 @@ function initDeployments(panel) {
       const act = (text, title, fn, cls = '') => el('button', { className: 'dact ' + cls, textContent: text, title,
         onclick: e => { e.stopPropagation(); fn(); } });
       return el('li', {
-        className: (d.id === (shown ? shown.dep.id : cur?.id) ? 'active' : '') + (r?.running ? ' running' : ''),
-        onclick: () => (r?.running ? showStatus(r) : select(d)),
-      }, el('div', { className: 'dltitle' }, el('b', { textContent: d.name }), r ? ring(r) : null),
+        className: (d.id === (cur ? cur.id : viewId) ? 'active' : '') + (r?.running ? ' running' : ''),
+        onclick: () => view(d),
+      }, el('div', { className: 'dltitle' }, el('b', { textContent: d.name }), teamBadge(d), r ? ring(r) : null),
       el('small', { textContent: `${d.targets.length} server${d.targets.length === 1 ? '' : 's'} · ${d.steps.length} step${d.steps.length === 1 ? '' : 's'}` }),
       el('div', { className: 'dacts' },
-        act('✎ Edit', 'Edit configuration', () => select(d)),
+        canEdit(d) ? act('✎ Edit', 'Edit configuration', () => select(d)) : null,
         r?.running ? act('■ Stop', 'Stop this run', () => api.deploy.cancel(r.id), 'stop')
           : act('▶ Run', 'Run deployment', () => runFromList(d), 'run'),
-        r ? act('◉', 'Status of the last run', () => showStatus(r)) : null,
         el('span', { className: 'grow' }),
-        act('🗑', 'Delete deployment', () => remove(d), 'del')));
+        ...teamBtns('deployment', d, () => load(), (t, title, fn) => act(t, title, fn)),
+        canEdit(d) ? act('🗑', 'Delete deployment', () => remove(d), 'del') : null));
     }));
   }
   // Progress ring next to a deployment's name: live while running, then the last run's result.
@@ -113,12 +131,12 @@ function initDeployments(panel) {
     if (!force && !leave()) return;
     cur = structuredClone(d);
     dirty = false;
-    shown = null;
+    viewId = null;
     renderEditor();
     renderList();
   }
   function renderEmpty() {
-    cur = null; shown = null;
+    cur = null; viewId = null;
     ed.className = 'deditor';
     ed.replaceChildren(el('div', { className: 'empty' },
       el('p', { textContent: 'Push files to one or more servers and run commands around them, with checks between stages.' }),
@@ -154,7 +172,7 @@ function initDeployments(panel) {
       el('span', { className: 'grow' }),
       el('button', { className: 'dsave' + (dirty ? ' dirty' : ''), textContent: 'Save', onclick: save }),
       d.id ? el('button', { textContent: 'Delete', onclick: () => remove(d) }) : null,
-      r ? el('button', { textContent: r.running ? '◉ Running…' : '◉ Last run', onclick: () => showStatus(r) }) : null,
+      el('button', { textContent: 'Close', title: 'Close the editor', onclick: closeEditor }),
       r?.running ? null : el('button', { className: 'primary', textContent: '🚀 Run deployment', onclick: start }));
 
     const ssh = servers.filter(x => x.type !== 'rdp');
@@ -269,7 +287,11 @@ function initDeployments(panel) {
       ...lib.map(x => el('option', { value: x.id, textContent: x.name })));
     lib$.onchange = () => {
       const x = lib.find(y => y.id === lib$.value);
-      if (x) { st.command = st.command.trim() ? `${st.command.replace(/\n+$/, '')}\n${x.command}` : x.command; rerender(); }
+      if (!x) return;
+      const { text, missing } = fillVars(x.command, x.vars || {}, libVars); // variables are filled in when the script is copied
+      if (missing.length) toast(`Not defined, left as is: ${missing.map(k => `{{${k}}}`).join(' ')}`, true);
+      st.command = st.command.trim() ? `${st.command.replace(/\n+$/, '')}\n${text}` : text;
+      rerender();
     };
     const t = el('textarea', { className: 'mono', spellcheck: false, rows: Math.min(12, Math.max(2, st.command.split('\n').length)), placeholder: 'command, or a multi-line script (#!/bin/bash supported)' });
     t.value = st.command;
@@ -305,31 +327,41 @@ function initDeployments(panel) {
       sel(c, 'onFail', { stop: 'If it fails: stop', alert: 'If it fails: alert only' }));
   }
 
+  function closeEditor() {
+    if (!leave()) return;
+    const d = cur?.id && list.find(x => x.id === cur.id);
+    cur = null;
+    if (d) view(d, true); else renderEmpty();
+  }
+
   // ---------- save / delete ----------
   async function save() {
     try {
       const saved = await api.deploy.save(cur);
       cur.id = saved.id;
       dirty = false;
+      cur = null; // saving closes the editor: the summary takes over
       await load(saved.id);
-      return true;
+      return saved.id;
     } catch (e) { toast(cleanErr(e), true); return false; }
   }
   async function remove(d) {
     if (!confirm(`Delete deployment "${d.name}"?`)) return;
     if (d.id) await api.deploy.delete(d.id);
     runs.delete(d.id);
-    if (cur?.id === d.id || shown?.dep.id === d.id) { dirty = false; renderEmpty(); }
+    if (cur?.id === d.id || viewId === d.id) { dirty = false; renderEmpty(); }
     load();
   }
 
   // ---------- run ----------
   async function start() { // from the editor: save first so the run matches what is on screen
     if (!cur.targets.length) return toast('Pick at least one target server.', true);
-    if (await save()) runDeployment(cur);
+    const d = structuredClone(cur);
+    const id = await save();
+    if (id) runDeployment(list.find(x => x.id === id) || d);
   }
   async function runFromList(d) {
-    if (dirty && cur?.id === d.id) { if (!(await save())) return; d = cur; } else if (!leave()) return;
+    if (dirty && cur?.id === d.id) { const copy = structuredClone(cur); const id = await save(); if (!id) return; d = list.find(x => x.id === id) || copy; } else if (!leave()) return;
     if (!d.targets.length) { select(d, true); return toast('Pick at least one target server.', true); }
     runDeployment(d);
   }
@@ -341,14 +373,34 @@ function initDeployments(panel) {
     buildStatus(run, r.targets);
     deployRunHandlers.set(r.runId, ev => onEvent(run, ev));
     tick();
-    showStatus(run);
+    cur = null; dirty = false;
+    view(list.find(x => x.id === d.id) || d, true);
   }
-  function showStatus(run) {
-    if (shown !== run && !shown && !leave()) return;
-    shown = run; cur = null;
-    ed.className = 'deditor dstatus';
-    ed.replaceChildren(run.view);
-    run.con.scrollTop = run.con.scrollHeight;
+
+  // ---------- summary view: configuration, then the run diagram, then the (hidden by default) console ----------
+  function view(d, force = false) {
+    if (!force && cur && !leave()) return;
+    cur = null; dirty = false;
+    viewId = d.id;
+    const r = runs.get(d.id);
+    const ssh = servers.filter(x => d.targets.includes(x.id));
+    const row = (k, ...v) => el('div', { className: 'dsum-row' }, el('small', { className: 'muted', textContent: k }), el('div', {}, ...v));
+    const head = el('div', { className: 'dhead' }, el('h2', { textContent: d.name }), teamBadge(d),
+      el('span', { className: 'grow' }),
+      canEdit(d) ? el('button', { textContent: '✎ Edit', onclick: () => select(d) }) : null,
+      canEdit(d) ? el('button', { textContent: '🗑 Delete', onclick: () => remove(d) }) : null,
+      r?.running ? el('button', { className: 'danger-btn', textContent: '■ Stop', onclick: () => api.deploy.cancel(r.id) })
+        : el('button', { className: 'primary', textContent: '🚀 Run deployment', onclick: () => runFromList(d) }));
+    const summary = el('section', { className: 'dsum' }, head, flowGraph(d),
+      row('Servers', ...(ssh.length ? ssh.map(s => el('span', { className: 'dchip on' }, el('b', { textContent: s.name }), el('small', { className: 'mono', textContent: s.host })))
+        : [el('span', { className: 'muted', textContent: 'none selected — edit to pick servers' })])),
+      row('Mode', el('span', { textContent: d.parallel ? 'All servers in parallel' : 'One server at a time; stops at the first failed server' })),
+      row('Steps', ...(d.steps.length ? [el('ol', { className: 'dsum-steps' }, ...d.steps.map(st => el('li', { className: dStepValid(st) ? '' : 'skip' },
+        el('b', { textContent: `${D_TYPES[st.type].icon} ${D_TYPES[st.type].short}` }), el('span', { className: 'mono', textContent: dStepSummary(st) }))))]
+        : [el('span', { className: 'muted', textContent: 'no steps yet' })])));
+    ed.className = 'deditor';
+    ed.replaceChildren(summary, ...(r ? [r.view] : []));
+    if (r) r.con.scrollTop = r.con.scrollHeight;
     renderList();
   }
 
@@ -386,9 +438,8 @@ function initDeployments(panel) {
     run.view = el('div', { className: 'dsx' },
       el('section', { className: 'dsx-top' },
         el('div', { className: 'dhead' },
-          el('h2', { textContent: run.dep.name }), run.state, run.time,
+          el('h3', { textContent: '🚀 Run deployment' }), run.state, run.time,
           el('span', { className: 'grow' }),
-          el('button', { textContent: '✎ Edit', onclick: () => { const d = list.find(x => x.id === run.dep.id); if (d) select(d); } }),
           run.stopBtn, run.againBtn),
         el('div', { className: 'dprog' }, el('div', { className: 'dprog-track' }, run.bar), run.pct),
         el('div', { className: 'dtracks' }, ...rows)),
@@ -420,7 +471,7 @@ function initDeployments(panel) {
     if (rg) paintRing(rg, run);
     paintNavRing();
     const st = [...run.targets.values()].map(t => t.status);
-    run.bar.className = 'dprog-fill' + (st.includes('failed') || st.includes('cancelled') ? ' failed' : st.includes('warning') ? ' warn' : '');
+    run.bar.className = 'dprog-fill' + (run.running ? '' : ' done') + (st.includes('failed') || st.includes('cancelled') ? ' failed' : st.includes('warning') ? ' warn' : '');
   }
   function paintTime(run) {
     run.time.textContent = `started ${new Date(run.started).toLocaleTimeString()} · ${fmtDur((run.ended || Date.now()) - run.started)}`;
@@ -465,10 +516,14 @@ function initDeployments(panel) {
       run.againBtn.hidden = false;
       paintTime(run);
       paintProgress(run);
+      histSet([{ name: run.dep.name, started: run.started, ended: run.ended, result: cls, summary,
+        targets: [...run.targets.values()].map(t => ({ name: t.name, status: t.status })), log: run.con.textContent.slice(-20000) }, ...histGet()]);
+      renderHistory();
       toast(`${run.dep.name}: ${summary}`, !!failed);
       notify(`🚀 Deployment ${run.dep.name}`, summary);
       renderList();
       if (cur?.id === run.dep.id) renderEditor();
+      else if (!cur && viewId === run.dep.id) view(list.find(x => x.id === run.dep.id) || run.dep, true);
       return;
     }
     const t = run.targets.get(ev.target);
@@ -495,6 +550,16 @@ function initDeployments(panel) {
     paintProgress(run);
   }
 
+  renderHistory(); // after fmtDur is defined
   load();
   return { reload: load };
+}
+
+// Footer button: show / hide every deployment console (hidden by default).
+{
+  const b = document.querySelector('#ftDeployCon');
+  const set = on => { document.body.classList.toggle('dcon-open', on); b.classList.toggle('on', on); };
+  b.onclick = () => set(!document.body.classList.contains('dcon-open'));
+  const hb = document.querySelector('#ftDeployHist');
+  hb.onclick = () => { const on = !document.body.classList.contains('dhist-open'); document.body.classList.toggle('dhist-open', on); hb.classList.toggle('on', on); };
 }

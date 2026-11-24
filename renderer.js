@@ -1,4 +1,4 @@
-/* global api, Terminal, FitAddon, shq, logLevel, parseLogTime, logRowVisible, fileKind */
+/* global api, Terminal, FitAddon, shq, logLevel, parseLogTime, logRowVisible, fileKind, parseVars, varsText, fillVars, scriptKeys */
 
 // Outline file-manager icons (stroke only, 1em, colored via CSS by kind).
 const FILE_ICONS = {
@@ -32,6 +32,26 @@ const el = (tag, props = {}, ...kids) => {
 const iconBtn = (text, title, fn, cls = 'icon') =>
   el('button', { className: cls, title, textContent: text, onclick: e => { e.stopPropagation(); fn(); } });
 const cleanErr = e => String(e?.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+
+// ---- Google account / team: shared helpers (Settings → Account / Team; also used by deployments.js) ----
+let acctInfo = { signedIn: false, role: 'none', team: null };
+const loadAcct = async () => { try { acctInfo = await api.account.get(); } catch { /* keep the last known state */ } paintAcct(); return acctInfo; };
+const teamAdmin = () => ['owner', 'admin'].includes(acctInfo.role);
+const canEdit = x => !x?.team || teamAdmin(); // team items: admins only
+const teamBadge = x => (x?.team ? el('span', { className: 'team-badge', textContent: 'Team', title: 'Shared with your team' }) : null);
+// Team item → "Copy to personal"; your own item (team admins only) → "Publish to team". after() reloads the list.
+function teamBtns(kind, x, after, mk = iconBtn) {
+  if (x.team) {
+    return [mk('⧉', 'Copy to personal: your own editable copy', async () => {
+      try { toast(`Copied to your items: ${await api.team.copyToPersonal(kind, x.id)}`); after(); } catch (e) { toast(cleanErr(e), true); }
+    })];
+  }
+  if (!teamAdmin()) return [];
+  return [mk('⇪', 'Publish to team: moves it to the team workspace', async () => {
+    if (!confirm(`Publish "${x.name}" to the team?\n\nEveryone on the team will see and use it; only team admins can change it. Passwords stay on this computer.`)) return;
+    try { await api.team.publish(kind, x.id); toast(`"${x.name}" is now a team item`); after(); } catch (e) { toast(cleanErr(e), true); }
+  })];
+}
 const ago = t => {
   if (!t) return '—';
   const s = (Date.now() - t) / 1000;
@@ -100,12 +120,12 @@ $('#homeTab').onclick = () => show('home');
 // Server tab + page header follow the server's group (name chip, gentle color). Re-run when groups change.
 function paintTabs() {
   for (const [sid, v] of views) {
-    const g = servers.find(x => x.id === sid)?.group || '';
+    const s = servers.find(x => x.id === sid), g = s?.group || '', e = s && envById(envOfServer(s));
     tintGroup(v.tabEl, g);
-    v.tabEl.title = g ? `Group: ${g}` : '';
+    v.tabEl.title = [e && `Environment: ${envIcon(e)} ${e.name}`, g && `Group: ${g}`].filter(Boolean).join(' · ');
     const chip = v.root.querySelector('.sgroup');
-    chip.textContent = g ? `▣ ${g}` : '';
-    chip.hidden = !g;
+    chip.textContent = [e && `${envIcon(e)} ${e.name}`, g && `▣ ${g}`].filter(Boolean).join('  ›  ');
+    chip.hidden = !e;
     tintGroup(chip, g);
   }
 }
@@ -173,17 +193,35 @@ let collapsed = new Set();
 try { collapsed = new Set(JSON.parse(localStorage.getItem('collapsedGroups')) || []); } catch { /* start expanded */ }
 const saveCollapsed = () => { try { localStorage.setItem('collapsedGroups', JSON.stringify([...collapsed])); } catch { /* ignore */ } };
 
+// ---- environments: each one holds parameters + groups + servers (see main.js "environments") ----
+let envs = { list: [], groups: {} };
+let curEnv = 'all'; // switcher: 'all' or an environment id
+try { curEnv = localStorage.getItem('curEnv') || 'all'; } catch { /* default */ }
+const envById = id => envs.list.find(e => e.id === id);
+const envIcon = e => (e?.shared ? '👥' : '👤'); // shared with the team / only yours
+const envOfGroup = g => (envById(envs.groups[g]) ? envs.groups[g] : 'local');
+const envOfServer = s => (s.team ? 'team' : s.group ? envOfGroup(s.group) : envById(s.env) ? s.env : 'local');
+const inEnv = s => curEnv === 'all' || envOfServer(s) === curEnv;
+// Environment used for a script run on a server (local terminals: the switcher's, or Local).
+const runEnv = sid => { const s = servers.find(x => x.id === sid); return envById(s ? envOfServer(s) : curEnv) || envById('local'); };
+const envVarsFor = sid => { const e = runEnv(sid); return e ? { ...e.vars, ENV: e.name } : {}; };
+const envByKey = () => Object.fromEntries(envs.list.map(e => [e.key, e.vars || {}]));
+
 async function refreshServers() {
-  [servers, users, savedGroups, groupColors] = await Promise.all([api.servers.list(), api.users.list(), api.groups.list(), api.groups.colors()]);
+  [servers, users, savedGroups, groupColors, envs] = await Promise.all([api.servers.list(), api.users.list(), api.groups.list(), api.groups.colors(), api.envs.list()]);
+  if (curEnv !== 'all' && !envById(curEnv)) curEnv = 'all';
+  renderEnvSel();
   renderNav();
   paintTabs();
   renderServers();
   renderUsers();
 }
 
+// Groups of the selected environment (all of them with "All environments").
 function groupNames() {
-  const named = [...new Set([...savedGroups, ...servers.map(s => s.group).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
-  return servers.some(s => !s.group) ? [...named, UNGROUPED] : named;
+  const named = [...new Set([...savedGroups, ...servers.map(s => s.group).filter(Boolean)])]
+    .filter(g => curEnv === 'all' || envOfGroup(g) === curEnv).sort((a, b) => a.localeCompare(b));
+  return servers.some(s => !s.group && inEnv(s)) ? [...named, UNGROUPED] : named;
 }
 
 function setMode(mode) {
@@ -197,23 +235,35 @@ function setMode(mode) {
 
 function renderNav() {
   const g = modeGroup();
-  $('#navCount').textContent = servers.length;
-  $('#favCount').textContent = servers.filter(s => s.starred).length || '';
+  $('#navCount').textContent = servers.filter(inEnv).length;
+  $('#favCount').textContent = servers.filter(s => s.starred && inEnv(s)).length || '';
   $('#userCount').textContent = users.length || '';
   $('#navAll').classList.toggle('active', homeMode === 'all');
   $('#navFav').classList.toggle('active', homeMode === 'fav');
   $('#navUsers').classList.toggle('active', homeMode === 'users');
   $('#navDeploy').classList.toggle('active', homeMode === 'deploy');
+  $('#navScripts').classList.toggle('active', homeMode === 'scripts');
+  $('#navBcast').classList.toggle('active', homeMode === 'bcast');
   $('#navGroups').replaceChildren(...groupNames().map(name => tintGroup(el('button', {
     className: 'navitem' + (g === name ? ' active' : ''), title: name, onclick: () => setMode(g === name ? 'all' : 'group:' + name), // click again = back to All Servers
-  }, el('i', { textContent: name === UNGROUPED ? '◌' : '▣' }), el('span', { className: 'lbl', textContent: name }),
-  el('span', { className: 'count lbl', textContent: servers.filter(s => groupOf(s) === name).length }),
+  }, el('i', { textContent: name === UNGROUPED ? '◌' : envIcon(envById(envOfGroup(name))), title: name === UNGROUPED ? '' : `Environment: ${envById(envOfGroup(name))?.name}` }),
+  el('span', { className: 'lbl', textContent: name }),
+  el('span', { className: 'count lbl', textContent: servers.filter(s => groupOf(s) === name && inEnv(s)).length }),
   ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name), 'icon gedit lbl')])), name === UNGROUPED ? '' : name)));
-  $('#serversView').hidden = homeMode === 'users' || homeMode === 'deploy';
+  $('#navEnvs').classList.toggle('active', homeMode === 'envs');
+  $('#envCount').textContent = envs.list.length || '';
+  $('#envsView').hidden = homeMode !== 'envs';
+  if (homeMode === 'envs') renderEnvPage();
+  $('#serversView').hidden = ['users', 'deploy', 'scripts', 'bcast', 'envs'].includes(homeMode);
   $('#usersView').hidden = homeMode !== 'users';
   $('#deployView').hidden = homeMode !== 'deploy';
+  $('#scriptsView').hidden = homeMode !== 'scripts';
+  $('#bcastView').hidden = homeMode !== 'bcast';
   $('#home .content').classList.toggle('flush', homeMode === 'deploy');
+  $('#home .content').classList.toggle('fill', homeMode === 'scripts' || homeMode === 'bcast');
   if (homeMode === 'deploy') deploys ||= initDeployments($('#deployView .panel'));
+  if (homeMode === 'scripts') homeScripts().load();
+  if (homeMode === 'bcast') bcastOptions();
   // suggestions for the server form
   $('#groupList').replaceChildren(...groupNames().filter(x => x !== UNGROUPED).map(value => el('option', { value })));
   $('#usernameList').replaceChildren(...users.map(u => el('option', { value: u.username, label: u.label })));
@@ -317,7 +367,7 @@ api.avail.get().then(a => { avail = a; paintAvail(); });
 function serverRow(s) {
   const tr = el('tr', { className: 'srow' + (alertState.get(s.id)?.size ? ' alerting' : '') },
     el('td', { className: 'state' }, avMark(s.id, 'server')),
-    el('td', {}, el('b', { textContent: s.name })),
+    el('td', {}, el('b', { textContent: s.name }), teamBadge(s)),
     el('td', {}, el('span', { className: 'proto ' + typeOf(s), textContent: typeOf(s).toUpperCase() })),
     el('td', { className: 'mono', title: s.userLabel ? `Login: saved user "${s.userLabel}"` : '' },
       `${s.username ? s.username + '@' : ''}${s.host}` + (s.port !== defaultPort(s) ? `:${s.port}` : ''),
@@ -328,8 +378,9 @@ function serverRow(s) {
     el('td', { className: 'muted', textContent: ago(s.lastSeen) }),
     el('td', { className: 'r actions' },
       iconBtn(s.starred ? '★' : '☆', s.starred ? 'Unfavorite' : 'Favorite', () => toggleStar(s), 'icon' + (s.starred ? ' star' : '')),
-      iconBtn('✎', 'Edit', () => editServer(s)),
-      iconBtn('🗑', 'Delete', () => deleteServer(s), 'icon danger'),
+      iconBtn('✎', canEdit(s) ? 'Edit' : 'Your login for this team server', () => editServer(s)),
+      ...teamBtns('server', s, refreshServers),
+      canEdit(s) ? iconBtn('🗑', 'Delete', () => deleteServer(s), 'icon danger') : null,
       withAv(typeOf(s) === 'rdp'
         ? iconBtn('🖥 Desktop', `Open Remote Desktop (RDP, port ${s.port})`, () => openRdp(s), 'desk')
         : iconBtn(...(DESKTOP[s.os] || DESKTOP['']), () => openDesktop(s), 'desk'), s.id, 'desk'),
@@ -344,11 +395,12 @@ function renderServers() {
   const g = modeGroup();
   const list = servers
     .filter(s => homeMode !== 'fav' || s.starred)
+    .filter(inEnv)
     .filter(s => !g || groupOf(s) === g)
     .filter(s => !q || [s.name, s.host, s.username, s.group || '', s.details || '', ...s.tags].some(x => x.toLowerCase().includes(q)))
     .sort((a, b) => b.starred - a.starred || a.name.localeCompare(b.name));
   $('#countBadge').textContent = `${list.length} server${list.length === 1 ? '' : 's'}`;
-  $('#homeTitle').textContent = g || (homeMode === 'fav' ? 'Favorites' : 'All Servers');
+  $('#homeTitle').textContent = g || (homeMode === 'fav' ? 'Favorites' : curEnv === 'all' ? 'All Servers' : envById(curEnv)?.name || 'All Servers');
   const rows = [];
   for (const name of g ? [g] : groupNames()) { // a selected group shows only itself, not the others as empty
     const members = list.filter(s => groupOf(s) === name);
@@ -359,7 +411,9 @@ function renderServers() {
       onclick: () => { collapsed[collapsed.has(name) ? 'delete' : 'add'](name); saveCollapsed(); renderServers(); },
     }, el('td', { colSpan: 9 },
       el('span', { className: 'caret', textContent: shut ? '▸' : '▾' }),
+      ...(name === UNGROUPED ? [] : [el('span', { className: 'envi', textContent: envIcon(envById(envOfGroup(name))), title: envById(envOfGroup(name))?.name })]),
       el('b', { textContent: name }),
+      ...(curEnv === 'all' && name !== UNGROUPED ? [el('small', { className: 'muted', textContent: envById(envOfGroup(name))?.name })] : []),
       el('span', { className: 'count', textContent: members.length }),
       el('span', { className: 'grow' }),
       el('span', { className: 'gacts' },
@@ -370,16 +424,24 @@ function renderServers() {
   }
   $('#serverRows').replaceChildren(...rows);
   paintAvail();
-  $('#emptyHome').hidden = servers.length > 0;
+  $('#emptyHome').hidden = servers.filter(inEnv).length > 0;
 }
 // ---- groups: new / rename / delete ----
 // Gentle (muted pastel) colors: readable as text tint and as a soft background in both themes.
-const GROUP_PALETTE = ['#8fb3d9', '#8fc9a8', '#d9c48f', '#d9a38f', '#d98fa8', '#b39fd9', '#8fcfcf', '#b8c98f'];
+const GROUP_PALETTE = ['#8fb3d9', '#8fc9a8', '#d9c48f', '#d9a38f', '#d98fa8', '#b39fd9', '#8fcfcf', '#b8c98f',
+  '#5b8fd9', '#3fb77a', '#e0b030', '#e07a3f', '#e0527a', '#8a63d2', '#2fb5b5', '#8fb830',
+  '#c9c9c9', '#8a8f98', '#a0714f', '#4a5fb0', '#d94f4f', '#e08fd0', '#6fd0a0', '#f0d060'];
 const groupColor = g => (g && groupColors[g]) || '';
 // Tint an element with a group color (CSS uses --gc); no color = untouched.
 const tintGroup = (e, g) => { const c = groupColor(g); e.classList.toggle('gc', !!c); if (c) e.style.setProperty('--gc', c); else e.style.removeProperty('--gc'); return e; };
-function editGroup(name = '') {
+function editGroup(name = '', env = '') {
   const dlg = $('#groupDlg'), f = $('#groupForm');
+  // which environment the group is in (team groups stay in Team)
+  const gEnv = name ? envOfGroup(name) : env || (curEnv !== 'all' && curEnv !== 'team' ? curEnv : 'local');
+  f.elements.env.replaceChildren(...envs.list.filter(e => e.id !== 'team' || gEnv === 'team')
+    .map(e => el('option', { value: e.id, textContent: `${envIcon(e)} ${e.name}` })));
+  f.elements.env.value = gEnv;
+  f.elements.env.disabled = gEnv === 'team';
   $('#groupTitle').textContent = name ? 'Edit group' : 'New group';
   f.elements.name.value = name;
   const n = servers.filter(s => s.group === name).length;
@@ -399,7 +461,7 @@ function editGroup(name = '') {
   dlg.addEventListener('close', async () => {
     try {
       if (dlg.returnValue === 'save') {
-        const next = await api.groups.save(name, f.elements.name.value, color);
+        const next = await api.groups.save(name, f.elements.name.value, color, f.elements.env.value);
         if (name && next !== name) {
           if (collapsed.delete(name)) { collapsed.add(next); saveCollapsed(); }
           if (modeGroup() === name) homeMode = 'group:' + next;
@@ -412,11 +474,104 @@ function editGroup(name = '') {
         if (modeGroup() === name) homeMode = 'all';
         toast(`Group ${name} deleted`);
       } else return;
-      refreshServers();
+      await refreshServers();
+      if ($('#envDlg').open) envGroupsPane();
     } catch (e) { toast(cleanErr(e), true); }
   }, { once: true });
 }
 $('#newGroupBtn').onclick = () => editGroup();
+
+// ---- environment switcher + settings dialog ----
+function renderEnvSel() {
+  $('#envSel').replaceChildren(el('option', { value: 'all', textContent: '◎ All environments' }),
+    ...envs.list.map(e => el('option', { value: e.id, textContent: `${envIcon(e)} ${e.name}` })),
+    el('option', { value: '+', textContent: '＋ New environment…' }));
+  $('#envSel').value = curEnv;
+  $('#envEditBtn').title = curEnv === 'all' ? 'Environment settings (Local)' : `Settings: ${envById(curEnv)?.name}`;
+}
+function setEnv(id) {
+  curEnv = id;
+  try { localStorage.setItem('curEnv', id); } catch { /* not remembered */ }
+  if (modeGroup() && !groupNames().includes(modeGroup())) homeMode = 'all';
+  renderEnvSel();
+  setMode(homeMode);
+}
+$('#envSel').onchange = () => { if ($('#envSel').value === '+') { $('#envSel').value = curEnv; editEnv(null); } else setEnv($('#envSel').value); };
+$('#envEditBtn').onclick = () => editEnv(curEnv === 'all' ? 'local' : curEnv);
+
+let envEditing = null; // the environment open in #envDlg
+function envTab(k) {
+  for (const b of $('#envForm').querySelectorAll('.stabs button')) b.classList.toggle('on', b.dataset.tab === k);
+  for (const p of $('#envForm').querySelectorAll('.spane')) p.hidden = p.dataset.pane !== k;
+}
+for (const b of $('#envForm').querySelectorAll('.stabs button')) b.onclick = () => envTab(b.dataset.tab);
+function envGroupsPane() {
+  const e = envEditing;
+  if (!e?.id) {
+    $('#envGroups').replaceChildren(el('p', { className: 'muted', textContent: 'Save the environment first, then add groups to it.' }));
+    $('#envNewGroup').hidden = true;
+    return;
+  }
+  $('#envNewGroup').hidden = e.id === 'team';
+  const names = [...new Set([...savedGroups, ...servers.map(s => s.group).filter(Boolean)])].filter(g => envOfGroup(g) === e.id).sort((a, b) => a.localeCompare(b));
+  $('#envGroups').replaceChildren(...(names.length ? names.map(g => tintGroup(el('div', { className: 'envgrp' },
+    el('span', { textContent: envIcon(e) }), el('b', { className: 'grow', textContent: g }),
+    el('span', { className: 'muted', textContent: `${servers.filter(s => s.group === g).length} servers` }),
+    iconBtn('✎', `Edit group ${g}`, () => editGroup(g))), g))
+    : [el('p', { className: 'muted', textContent: 'No groups yet.' })]));
+}
+function editEnv(id) {
+  const e = id ? envById(id) : { id: null, name: '', color: '', vars: {}, shared: false };
+  if (!e) return;
+  envEditing = e;
+  const f = $('#envForm'), ro = !!e.readOnly;
+  $('#envTitle').textContent = id ? `${envIcon(e)} ${e.name}` : 'New environment';
+  f.elements.name.value = e.id === 'local' ? (e.name === (acctInfo.email || '').split('@')[0] ? '' : e.name) : e.name;
+  f.elements.name.placeholder = e.id === 'local' ? (acctInfo.email ? acctInfo.email.split('@')[0] : 'Local') : 'e.g. Production';
+  f.elements.name.disabled = e.id === 'team';
+  f.elements.name.required = !e.builtin;
+  $('#envShareInfo').textContent = e.shared ? '👥 Shared with your team: everyone in the team sees it. Only team admins change it.'
+    : e.id === 'local' ? '👤 Your Local environment: your own servers, and the global variables as its parameters. Empty name = your account name.'
+      : '👤 Local: only you have it (backed up to your account when signed in).';
+  $('#envKey').textContent = e.key ? `Use {{name}} in scripts run on this environment's servers, or {{${e.key}.name}} from anywhere.` : 'Use {{name}} in scripts run on this environment\'s servers.';
+  f.elements.vars.value = varsText(e.vars);
+  f.elements.description.value = e.description || '';
+  f.elements.description.disabled = e.id === 'team';
+  f.elements.vars.disabled = ro;
+  let color = e.color || '';
+  const paintSw = () => $('#envColors').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.c === color));
+  $('#envColors').replaceChildren(...['', ...GROUP_PALETTE].map(c => {
+    const b = el('button', { type: 'button', className: 'sw' + (c ? '' : ' none'), title: c || 'No color', disabled: e.id === 'team', onclick: () => { color = c; paintSw(); } });
+    b.dataset.c = c;
+    if (c) b.style.background = c;
+    return b;
+  }));
+  paintSw();
+  f.querySelector('.edel').hidden = !e.id || e.builtin;
+  f.querySelector('.esave').hidden = ro;
+  envTab('general');
+  envGroupsPane();
+  const dlg = $('#envDlg');
+  dlg.returnValue = '';
+  dlg.showModal();
+  dlg.addEventListener('close', async () => {
+    try {
+      if (dlg.returnValue === 'save') {
+        const nid = await api.envs.save({ id: e.id, name: f.elements.name.value, color, description: f.elements.description.value, vars: parseVars(f.elements.vars.value) });
+        toast(id ? 'Environment saved' : `Environment ${f.elements.name.value.trim()} created`);
+        await refreshServers();
+        if (!id) setEnv(nid);
+        homeScriptsPanel?.load();
+      } else if (dlg.returnValue === 'delete') {
+        if (!await confirmDeleteEnv(e)) return;
+        await api.envs.delete(e.id);
+        toast(`Environment ${e.name} deleted`);
+        await refreshServers();
+      }
+    } catch (err) { toast(cleanErr(err), true); }
+  }, { once: true });
+}
+$('#envNewGroup').onclick = () => editGroup('', envEditing?.id);
 
 $('#collapseAll').onclick = () => { collapsed = new Set(groupNames()); saveCollapsed(); renderServers(); };
 $('#expandAll').onclick = () => { collapsed.clear(); saveCollapsed(); renderServers(); };
@@ -465,6 +620,11 @@ function editServer(s = {}) {
   f.elements.id.value = ''; // reset() keeps hidden inputs: a stale id turned "Add" into overwriting the last edited server
   for (const k of ['id', 'name', 'host', 'port', 'username', 'keyPath', 'group']) if (s[k] != null) f.elements[k].value = s[k];
   f.elements.type.value = typeOf(s);
+  f.elements.env.replaceChildren(...envs.list.filter(e => e.id !== 'team' || s.team)
+    .map(e => el('option', { value: e.id, textContent: `${envIcon(e)} ${e.name}` })));
+  f.elements.env.value = s.id ? envOfServer(s) : s.group ? envOfGroup(s.group) : curEnv !== 'all' && curEnv !== 'team' ? curEnv : 'local';
+  f.elements.env.dataset.pick = f.elements.env.value; // restored when the group is changed to a new one
+  syncFormEnv();
   f.elements.domain.value = s.domain || '';
   f.elements.sshPort.value = s.sshPort || 22;
   f.elements.userId.replaceChildren(el('option', { value: '', textContent: 'Enter username / password below' }),
@@ -475,10 +635,25 @@ function editServer(s = {}) {
   f.elements.details.value = s.details || '';
   f.elements.starred.checked = !!s.starred;
   f.elements.probe.checked = !s.noProbe;
+  // Team server, not an admin: shared fields are read-only; the login fields stay editable (saved locally).
+  const lock = !canEdit(s);
+  $('#serverTeamNote').hidden = !lock;
+  for (const k of ['name', 'host', 'port', 'group', 'tags', 'details', 'domain', 'sshPort']) f.elements[k].readOnly = lock;
+  f.elements.type.disabled = lock;
   $('#serverDlg').returnValue = ''; // Esc must not reuse the last 'save'
   $('#serverDlg').showModal();
 }
 
+// An existing group decides the environment; a new group is created in the chosen one.
+function syncFormEnv() {
+  const f = $('#serverForm'), g = f.elements.group.value.trim();
+  const known = g && [...savedGroups, ...servers.map(s => s.group)].includes(g);
+  f.elements.env.value = known ? envOfGroup(g) : f.elements.env.dataset.pick;
+  f.elements.env.disabled = !!known || f.elements.env.value === 'team';
+  f.elements.env.title = known ? `Group ${g} is in this environment` : '';
+}
+$('#serverForm').elements.group.addEventListener('input', syncFormEnv);
+$('#serverForm').elements.env.addEventListener('change', e => { e.target.dataset.pick = e.target.value; });
 // Show only the fields that apply; swap the default port when the type changes.
 function syncFormType() {
   const f = $('#serverForm');
@@ -509,7 +684,7 @@ $('#serverDlg').addEventListener('close', async () => {
   try {
     await api.servers.save({
       id: e.id.value || undefined, type: e.type.value, domain: e.domain.value.trim(), sshPort: e.sshPort.value,
-      name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, userId: e.userId.value,
+      name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, env: e.env.value, userId: e.userId.value,
       username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
       tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
       details: e.details.value, noProbe: !e.probe.checked,
@@ -525,12 +700,15 @@ async function deleteServer(s) {
   refreshServers();
 }
 
-$('#addBtn').onclick = () => editServer({ group: modeGroup() && modeGroup() !== UNGROUPED ? modeGroup() : '' });
+$('#addBtn').onclick = () => editServer({ group: modeGroup() && modeGroup() !== UNGROUPED ? modeGroup() : '' }); // environment: the switcher's
 $('#filter').oninput = renderServers;
 $('#navAll').onclick = () => setMode('all');
 $('#navFav').onclick = () => setMode('fav');
 $('#navUsers').onclick = () => setMode('users');
 $('#navDeploy').onclick = () => setMode('deploy');
+$('#navScripts').onclick = () => setMode('scripts');
+$('#navBcast').onclick = () => setMode('bcast');
+$('#navEnvs').onclick = () => setMode('envs');
 
 // ---- users (saved credentials) ----
 function renderUsers() {
@@ -618,7 +796,8 @@ function showProvider(p) {
   aiMsg('');
 }
 async function openSettings(focusKey = false) {
-  aiSettings = await api.settings.get();
+  [aiSettings] = await Promise.all([api.settings.get(), loadAcct()]);
+  renderAccount();
   const f = $('#settingsForm');
   f.reset();
   f.elements.theme.value = getThemePref();
@@ -654,6 +833,93 @@ $('#logOpen').onclick = () => api.log.openFolder();
 $('#logConsole').onclick = () => api.log.openConsole();
 $('#settingsBtn').onclick = () => openSettings();
 $('#consoleBtn').onclick = () => api.log.openConsole();
+
+// ---- Settings → Account / Team (buttons act right away; they are not part of Save) ----
+async function acctAction(btn, fn, okMsg) {
+  btn.disabled = true;
+  try { const r = await fn(); if (r?.signedIn !== undefined) acctInfo = r; if (okMsg) toast(okMsg); }
+  catch (e) { toast(cleanErr(e), true); }
+  finally { btn.disabled = false; renderAccount(); paintAcct(); }
+}
+function renderAccount() {
+  const a = acctInfo;
+  const btn = (text, fn, cls = '') => el('button', { type: 'button', className: cls, textContent: text, onclick: e => fn(e.currentTarget) });
+  $('#acctBox').replaceChildren(...(!a.configured
+    ? [el('p', { textContent: 'Google sign-in is not set up in this build of EranTerm.' }),
+      btn('How to set it up', () => api.help.manual('team-setup'))]
+    : !a.signedIn
+      ? [el('p', { textContent: 'Sign in with your Google account to back up your configuration to your Google Drive and use it on other computers.' }),
+        btn('Sign in with Google', b => acctAction(b, async () => { toast('Finish signing in in your browser…'); return api.account.signIn(); }, 'Signed in'), 'primary')]
+      : [el('p', {}, 'Signed in as ', el('b', { textContent: a.email })),
+        el('p', { className: 'hint', textContent: a.lastSyncAt ? `Last backup to your Google Drive: ${new Date(a.lastSyncAt).toLocaleString()}${a.pending ? ' · changes waiting to upload' : ''}` : 'Not backed up yet.' }),
+        el('span', { className: 'modelrow' },
+          btn('Sync now', b => acctAction(b, () => api.account.syncNow(), 'Synced')),
+          btn('Sign out', b => { if (confirm('Sign out? Your servers and settings stay on this computer; team items are hidden until you sign in again.')) acctAction(b, () => api.account.signOut(), 'Signed out'); }))]));
+  renderTeam();
+}
+function renderTeam() {
+  const a = acctInfo, t = a.team;
+  const ROLE = { owner: 'Owner (manages the team)', admin: 'Admin (publishes and edits team items)', member: 'Member (uses team items)' };
+  if (!a.signedIn) return $('#teamBox').replaceChildren(el('p', { className: 'muted', textContent: 'Sign in (Account tab) to use a shared team workspace.' }), teamHelp());
+  if (!t) {
+    return $('#teamBox').replaceChildren(
+      el('p', { textContent: 'You are not on a team. Ask the team owner to add your email, then press Sync now in the Account tab.' }),
+      el('p', { className: 'hint', textContent: 'Setting up the team for the first time? Create it: you become its owner and add your teammates by email.' }),
+      el('button', { type: 'button', textContent: 'Create team', onclick: e => acctAction(e.currentTarget, () => api.team.create(), 'Team created: you are the owner') }),
+      teamHelp());
+  }
+  const kids = [el('p', {}, 'Your role: ', el('b', { textContent: ROLE[a.role] || a.role }), el('span', { className: 'muted', textContent: ` · owner ${t.owner}` }))];
+  if (a.role === 'owner') {
+    const ta = (name, list) => { const x = el('textarea', { name, rows: 4, spellcheck: false, className: 'mono' }); x.value = list.join('\n'); return x; };
+    const admins = ta('teamAdmins', t.admins), members = ta('teamMembers', t.members);
+    kids.push(el('label', {}, 'Admins: can publish and edit team servers, scripts and deployments (one email per line)', admins),
+      el('label', {}, 'Members: can use team items (one email per line)', members),
+      el('button', { type: 'button', className: 'primary', textContent: 'Save team',
+        onclick: e => acctAction(e.currentTarget, () => api.team.setMembers({ admins: admins.value, members: members.value }), 'Team saved') }),
+      el('p', { className: 'hint', textContent: 'Each person signs in to EranTerm with that Google account. Removing an email removes their access to team items at their next sync.' }));
+  } else {
+    kids.push(el('p', { className: 'hint', textContent: `${t.admins.length} admin(s), ${t.members.length} member(s).` }));
+  }
+  if (teamAdmin()) {
+    kids.push(el('p', { className: 'hint', textContent: 'Publish items with ⇪ on a server, script or deployment. Your global script variables:' }),
+      el('button', { type: 'button', textContent: '⇪ Publish my global variables to the team',
+        onclick: e => acctAction(e.currentTarget, () => api.team.publish('vars', 'globals'), 'Global variables published') }));
+  }
+  kids.push(teamHelp());
+  $('#teamBox').replaceChildren(...kids);
+}
+const teamHelp = () => el('button', { type: 'button', className: 'sm', textContent: '? Help: Team / shared environments', onclick: () => api.help.manual('team-setup') });
+// Something changed in the cloud (another computer, the team): reload what is on screen.
+api.account.onChanged(async () => {
+  await loadAcct();
+  refreshServers();
+  homeScriptsPanel?.load();
+  deploys?.reload();
+  if ($('#settingsDlg').open) renderAccount();
+});
+
+// ---- feedback (Help → Send Feedback…, side menu) ----
+async function openFeedback() {
+  await loadAcct();
+  const f = $('#feedbackForm');
+  f.reset();
+  $('#feedbackWho').textContent = acctInfo.signedIn ? `Sent as ${acctInfo.email}, with your EranTerm version and OS.` : 'Sign in first (Settings → Account) so we know who sent it.';
+  $('#feedbackDlg').returnValue = '';
+  $('#feedbackDlg').showModal();
+}
+$('#feedbackForm').addEventListener('submit', async e => {
+  if (e.submitter?.value !== 'send') return;
+  e.preventDefault(); // stay open on failure
+  const btn = e.submitter;
+  btn.disabled = true;
+  try {
+    await api.feedback.send($('#feedbackForm').elements.text.value);
+    $('#feedbackDlg').close('send');
+    toast('Thanks! Feedback sent.');
+  } catch (err) { toast(cleanErr(err), true); } finally { btn.disabled = false; }
+});
+$('#feedbackBtn').onclick = openFeedback;
+api.feedback.onOpen(openFeedback);
 
 // Confirm / small form dialog. body: string or element(s). Resolves true on OK.
 function ask({ title, body, ok = 'OK', danger = false, okDisabled = false }) {
@@ -757,6 +1023,7 @@ const shellsById = new Map(); // shellId -> terminal wrapper
 api.ssh.onData((id, d) => shellsById.get(id)?.term.write(d));
 api.ssh.onClosed(id => {
   shellsById.get(id)?.term.writeln('\r\n\x1b[90m[session closed]\x1b[0m');
+  for (const p of bcast.panes) if (p.t?.id === id && !p.failed) p.fail('session closed');
   shellsById.delete(id);
 });
 
@@ -785,7 +1052,8 @@ function pushHist(serverId, cmd) {
   try { localStorage.setItem('hist:' + serverId, JSON.stringify(h)); } catch { /* ignore */ }
 }
 
-function makeTerm(host, connId, cwd, serverId) {
+// opts.input(data): where typed keys go (Broadcast sends them to many shells); default: this shell.
+function makeTerm(host, connId, cwd, serverId, opts = {}) {
   const term = new Terminal({
     cursorBlink: true, fontSize: 13, fontFamily: 'Menlo, monospace',
     theme: termTheme(),
@@ -795,6 +1063,7 @@ function makeTerm(host, connId, cwd, serverId) {
   term.loadAddon(fit);
   term.open(host);
   const t = { term, id: null };
+  const send = d => (opts.input ? opts.input(d) : api.ssh.write(t.id, d));
   const refit = () => { if (host.offsetParent) fit.fit(); };
   const ro = new ResizeObserver(refit); // handles window resize and hidden->shown
   ro.observe(host);
@@ -844,7 +1113,7 @@ function makeTerm(host, connId, cwd, serverId) {
   }
   function accept() {
     const rest = sug.items[sug.idx]?.slice(sug.line.length);
-    if (rest && t.id) { api.ssh.write(t.id, rest); sug.line += rest; }
+    if (rest && t.id) { send(rest); sug.line += rest; }
     hide();
   }
   function track(d) {
@@ -883,11 +1152,12 @@ function makeTerm(host, connId, cwd, serverId) {
   t.ready = api.ssh.shell(connId, term.cols, term.rows, cwd).then(id => {
     t.id = id;
     shellsById.set(id, t);
-    term.onData(d => { track(d); api.ssh.write(id, d); }); // track first: Enter must see the line before the echo
+    term.onData(d => { track(d); send(d); }); // track first: Enter must see the line before the echo
     term.onResize(({ cols, rows }) => api.ssh.resize(id, cols, rows));
     api.ssh.resize(id, term.cols, term.rows); // size may have changed while the shell was opening
   }, e => term.writeln(`\x1b[31m${cleanErr(e)}\x1b[0m`));
   t.run = async cmd => { await t.ready; if (t.id) api.ssh.write(t.id, cmd); };
+  t.refit = refit;
   t.dispose = () => {
     ro.disconnect();
     if (t.id) { api.ssh.closeShell(t.id); shellsById.delete(t.id); }
@@ -896,6 +1166,439 @@ function makeTerm(host, connId, cwd, serverId) {
   };
   return t;
 }
+
+// ================= scripts panel (server Terminal, home Scripts module, Broadcast) =================
+// box: a clone of #scriptsTpl. run(keys): types a script into a terminal; without it there is no Run button.
+let globalVars = {}; // shared by all scripts; a script's own (local) variable of the same name wins
+function makeScriptsPanel(box, { run, runTitle = 'Run' } = {}) {
+  const q = sel => box.querySelector(sel);
+  let scripts = [], dragId = null;
+  const activeTags = new Set();
+  const pref = (k, d) => { try { return localStorage.getItem(k) || d; } catch { return d; } };
+  const setPref = (k, v) => { try { localStorage.setItem(k, v); } catch { /* not remembered */ } };
+  let sortMode = pref('scriptSort', 'manual');
+  q('.sc-sort').value = sortMode;
+  q('.sc-tagmode').value = pref('scriptTagMode', 'or');
+  q('.sc-hidebuiltin').checked = pref('scriptHideBuiltin', '') === '1';
+  q('.sc-hidebuiltin').onchange = () => { setPref('scriptHideBuiltin', q('.sc-hidebuiltin').checked ? '1' : ''); render(); };
+  q('.sc-tagmode').onchange = () => { setPref('scriptTagMode', q('.sc-tagmode').value); render(); };
+  // built-ins carry the 'built-in' tag; removing that tag makes one count as the user's
+  const shown = () => (q('.sc-hidebuiltin').checked ? scripts.filter(x => !(x.tags || []).includes('built-in')) : scripts);
+  const lastRun = () => { try { return JSON.parse(localStorage.getItem('scriptLastRun')) || {}; } catch { return {}; } };
+  const tagMatch = x => !activeTags.size || [...activeTags][q('.sc-tagmode').value === 'and' ? 'every' : 'some'](t => (x.tags || []).includes(t));
+
+  async function load() {
+    try { [scripts, globalVars] = await Promise.all([api.scripts.list(), api.scripts.globals()]); } catch (e) { toast(cleanErr(e), true); }
+    render();
+  }
+  const toggleTag = t => { activeTags[activeTags.has(t) ? 'delete' : 'add'](t); render(); };
+
+  function renderTags() {
+    const counts = new Map();
+    for (const x of shown()) for (const t of x.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
+    for (const t of activeTags) if (!counts.has(t)) activeTags.delete(t);
+    q('.sc-tagmode').hidden = activeTags.size < 2; // AND/OR only matters with two or more tags picked
+    q('.sc-tags').replaceChildren(
+      ...[...counts.keys()].sort().map(t => el('button', {
+        className: 'tchip' + (activeTags.has(t) ? ' on' : ''), title: `Show scripts tagged "${t}"`, onclick: () => toggleTag(t),
+      }, t, el('small', { textContent: counts.get(t) }))),
+      ...(activeTags.size ? [el('button', { className: 'tchip clear', textContent: '✕ Clear', onclick: () => { activeTags.clear(); render(); } })] : []));
+  }
+
+  function render() {
+    renderTags();
+    const f = q('.sc-filter').value.toLowerCase();
+    let list = shown()
+      .filter(x => !f || `${x.name} ${x.description} ${x.command} ${(x.tags || []).join(' ')}`.toLowerCase().includes(f))
+      .filter(tagMatch);
+    if (sortMode === 'name') list = [...list].sort((a, b) => a.name.localeCompare(b.name));
+    if (sortMode === 'recent') { const lr = lastRun(); list = [...list].sort((a, b) => (lr[b.id] || 0) - (lr[a.id] || 0)); }
+    const canDrag = sortMode === 'manual' && !f && !activeTags.size;
+    q('.sc-hint').textContent = sortMode !== 'manual' ? '' : canDrag ? 'Drag ⋮⋮ to change the order.' : 'Clear the search and tag filters to drag scripts into a new order.';
+    q('.sc-list').replaceChildren(...list.map(x => {
+      const nVars = Object.keys(x.vars || {}).length;
+      const isBuiltin = (x.tags || []).includes('built-in');
+      const li = el('li', { title: x.command, draggable: canDrag, className: isBuiltin ? 'builtin' : '' },
+        el('div', { className: 'sc-head' },
+          canDrag ? el('span', { className: 'grip', textContent: '⋮⋮', title: 'Drag to reorder' }) : null,
+          isBuiltin ? el('span', { className: 'bi-badge', textContent: '🧰', title: 'Built-in script' }) : null,
+          el('b', { textContent: x.name }), teamBadge(x),
+          x.root ? el('span', { textContent: '🔒', title: 'Runs as root (sudo)' }) : null,
+          x.confirm ? el('span', { textContent: '⏎', title: 'Waits for Enter before executing' }) : null,
+          nVars ? el('span', { className: 'muted', textContent: `{{${nVars}}}`, title: `Local variables: ${Object.keys(x.vars).join(', ')}` }) : null,
+          el('span', { className: 'grow' }),
+          canEdit(x) ? iconBtn('✎', 'Edit', () => editScript(x)) : null,
+          ...teamBtns('script', x, load),
+          canEdit(x) ? iconBtn('🗑', 'Delete', () => deleteScript(x), 'icon danger') : null,
+          run ? iconBtn('▶ Run', runTitle, () => runScript(x), 'primary sm') : null),
+        x.description ? el('small', { textContent: x.description }) : null,
+        el('code', { className: 'mono', textContent: x.command.split('\n')[0] + (x.command.includes('\n') ? ' …' : '') }),
+        x.tags?.length ? el('div', { className: 'sc-tagrow' }, ...x.tags.map(t => el('span', {
+          className: 'tag' + (activeTags.has(t) ? ' on' : ''), textContent: t, title: `Filter by "${t}"`,
+          onclick: e => { e.stopPropagation(); toggleTag(t); },
+        }))) : null);
+      if (canDrag) {
+        li.ondragstart = e => { dragId = x.id; li.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; };
+        li.ondragend = () => { dragId = null; li.classList.remove('dragging'); };
+        li.ondragover = e => {
+          if (!dragId) return;
+          e.preventDefault();
+          const r = li.getBoundingClientRect();
+          const after = e.clientY > r.top + r.height / 2;
+          li.classList.toggle('drop-after', after);
+          li.classList.toggle('drop-before', !after);
+        };
+        li.ondragleave = () => li.classList.remove('drop-after', 'drop-before');
+        li.ondrop = async e => {
+          e.preventDefault();
+          const after = li.classList.contains('drop-after');
+          li.classList.remove('drop-after', 'drop-before');
+          if (!dragId || dragId === x.id) return;
+          const ids = scripts.map(y => y.id).filter(id => id !== dragId);
+          ids.splice(ids.indexOf(x.id) + (after ? 1 : 0), 0, dragId);
+          scripts = ids.map(id => scripts.find(y => y.id === id));
+          render();
+          try { await api.scripts.reorder(ids); } catch (err) { toast(cleanErr(err), true); load(); }
+        };
+      }
+      return li;
+    }));
+  }
+  q('.sc-sort').onchange = () => { sortMode = q('.sc-sort').value; setPref('scriptSort', sortMode); render(); };
+  q('.sc-restore').onclick = async () => {
+    const n = await api.scripts.restoreBuiltins();
+    toast(n ? `Restored ${n} built-in script${n === 1 ? '' : 's'}` : 'All built-in scripts are already in your list.');
+    load();
+  };
+  // run(keysFor): keysFor(serverId) gives the keys with that server's environment filled in.
+  function runScript(x) {
+    try { localStorage.setItem('scriptLastRun', JSON.stringify({ ...lastRun(), [x.id]: Date.now() })); } catch { /* ignore */ }
+    const miss = new Set();
+    run(sid => {
+      const { text, missing } = fillVars(x.command, x.vars || {}, globalVars, envVarsFor(sid), envByKey());
+      missing.forEach(k => miss.add(k));
+      return scriptKeys(text, x);
+    });
+    if (miss.size) toast(`Not defined, left as is: ${[...miss].map(k => `{{${k}}}`).join(' ')}`, true);
+  }
+  function editScript(x = {}) {
+    const f = $('#scriptForm');
+    f.reset();
+    for (const k of ['id', 'name', 'description', 'command']) f.elements[k].value = x[k] || '';
+    f.elements.root.checked = !!x.root;
+    f.elements.confirm.checked = !!x.confirm;
+    f.elements.tags.value = (x.tags || []).join(', ');
+    f.elements.localVars.value = varsText(x.vars);
+    f.elements.globalVars.value = varsText(globalVars);
+    const globalsBefore = f.elements.globalVars.value;
+    // which {{names}} the command uses and whether each one has a value
+    const varHint = () => {
+      // environment: the switcher's (or Local); the real one is the target server's, at run time
+      const { missing } = fillVars(f.elements.command.value, parseVars(f.elements.localVars.value), parseVars(f.elements.globalVars.value), envVarsFor(null), envByKey());
+      const used = [...new Set([...f.elements.command.value.matchAll(/\{\{\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*\}\}/g)].map(m => m[1]))];
+      $('#scriptVarHint').textContent = !used.length ? 'Use {{name}} in the script to insert a variable.'
+        : `Uses: ${used.join(', ')}` + (missing.length ? ` · not defined: ${missing.join(', ')}` : ' · all defined ✓');
+      $('#scriptVarHint').className = 'hint' + (missing.length ? ' warn' : '');
+    };
+    f.elements.command.oninput = f.elements.localVars.oninput = f.elements.globalVars.oninput = varHint;
+    varHint();
+    // Ask AI: shows a proposal; "Apply to form" fills the script (name/description/tags only when empty).
+    const out = $('#scriptAiOut');
+    out.hidden = true;
+    $('#scriptAiQ').value = '';
+    const ask = async () => {
+      const btn = $('#scriptAiBtn');
+      btn.disabled = true;
+      btn.textContent = '✦ Thinking…';
+      try {
+        const e = f.elements;
+        const r = await api.ai.script({ request: $('#scriptAiQ').value.trim(),
+          script: { name: e.name.value, description: e.description.value, command: e.command.value, vars: parseVars(e.localVars.value) },
+          globals: Object.keys(parseVars(e.globalVars.value)) });
+        const apply = () => {
+          e.command.value = r.command;
+          e.localVars.value = varsText({ ...parseVars(e.localVars.value), ...r.localVars });
+          if (!e.name.value.trim()) e.name.value = r.name;
+          if (!e.description.value.trim()) e.description.value = r.description;
+          if (!e.tags.value.trim()) e.tags.value = r.tags.join(', ');
+          e.root.checked = r.root;
+          varHint();
+          out.hidden = true;
+          toast('Applied — review it before saving');
+        };
+        out.replaceChildren(
+          el('div', { className: 'aiOutHead' }, el('b', { textContent: '✦ AI proposal' }), el('span', { className: 'aiRisk risk-' + r.risk, textContent: `risk: ${r.risk}` }),
+            el('span', { className: 'grow' }), el('button', { type: 'button', className: 'sm primary', textContent: 'Apply to form', onclick: apply }),
+            iconBtn('×', 'Close', () => { out.hidden = true; })),
+          el('div', { className: 'aiOutBody' }, // plain text: model output is never rendered as HTML
+            el('div', { textContent: r.explanation }),
+            el('pre', { className: 'mono', textContent: r.command }),
+            Object.keys(r.localVars).length ? el('div', { className: 'muted', textContent: 'Local variables: ' + varsText(r.localVars).replace(/\n/g, ' · ') }) : ''));
+      } catch (err) {
+        out.replaceChildren(el('div', { className: 'aiOutBody aiError' }));
+        showAiError(out.firstChild, err);
+      }
+      out.hidden = false;
+      btn.disabled = false;
+      btn.textContent = '✦ Ask AI';
+    };
+    $('#scriptAiBtn').onclick = ask;
+    // Enter would submit the form (closing the dialog): ask instead.
+    $('#scriptAiQ').onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); ask(); } };
+    // existing tags as one-click chips
+    const all = [...new Set(scripts.flatMap(y => y.tags || []))].sort();
+    $('#scriptTagPick').replaceChildren(...all.map(t => el('button', {
+      type: 'button', className: 'tchip', textContent: t,
+      onclick: () => {
+        const cur = f.elements.tags.value.split(',').map(y => y.trim()).filter(Boolean);
+        if (!cur.includes(t)) f.elements.tags.value = [...cur, t].join(', ');
+      },
+    })));
+    const dlg = $('#scriptDlg');
+    dlg.returnValue = '';
+    dlg.showModal();
+    dlg.addEventListener('close', async () => {
+      if (dlg.returnValue !== 'save') return;
+      const e = f.elements;
+      try {
+        await api.scripts.save({ id: e.id.value || undefined, name: e.name.value, description: e.description.value, command: e.command.value,
+          tags: e.tags.value, root: e.root.checked, confirm: e.confirm.checked, vars: parseVars(e.localVars.value) });
+        if (e.globalVars.value !== globalsBefore) await api.scripts.setGlobals(parseVars(e.globalVars.value));
+        load();
+      } catch (err) { toast(cleanErr(err), true); }
+    }, { once: true });
+  }
+  async function deleteScript(x) {
+    if (!confirm(`Delete script "${x.name}"?`)) return;
+    await api.scripts.delete(x.id);
+    load();
+  }
+  q('.sc-refresh').onclick = load;
+  q('.sc-add').onclick = () => editScript();
+  q('.sc-help').onclick = () => api.help.manual('scripting');
+  q('.sc-filter').oninput = render;
+  q('.sc-up').onclick = async () => {
+    try { const n = await api.scripts.import(); if (n) toast(`Imported ${n} script${n === 1 ? '' : 's'}`); load(); }
+    catch (e) { toast(`Import failed: ${cleanErr(e)}`, true); }
+  };
+  q('.sc-down').onclick = async () => {
+    try { const f = await api.scripts.export(); if (f) toast(`Exported to ${f}`); }
+    catch (e) { toast(cleanErr(e), true); }
+  };
+  return { load };
+}
+
+// ================= home: Scripts module =================
+let homeScriptsPanel;
+function homeScripts() {
+  if (homeScriptsPanel) return homeScriptsPanel;
+  const box = $('#scriptsTpl').content.firstElementChild.cloneNode(true);
+  box.classList.add('full');
+  box.querySelector('.sc-close').hidden = true;
+  $('#scriptsView').append(box);
+  return (homeScriptsPanel = makeScriptsPanel(box)); // managing only: Run lives in terminals
+}
+$('#srvImport').onclick = async () => {
+  try { const n = await api.servers.import(); if (n) { toast(`Imported ${n} server${n === 1 ? '' : 's'}`); await refreshServers(); renderServers(); } }
+  catch (e) { toast(e.message, true); }
+};
+$('#srvExport').onclick = async () => {
+  try { const f = await api.servers.export(); if (f) toast(`Exported to ${f}`); } catch (e) { toast(e.message, true); }
+};
+$('#scriptsManual').onclick = () => api.help.manual('scripting');
+
+// ================= home: Broadcast module =================
+// One terminal per pane (saved servers or localhost); keys typed in a checked pane go to every checked pane.
+const bcast = { panes: [], localNo: 0, scripts: null, mini: false };
+const bcastTargets = () => bcast.panes.filter(p => p.t?.id && p.chk.checked);
+function bcastSend(from, d) {
+  for (const p of $('#bcastOn').checked && from.chk.checked ? bcastTargets() : [from]) if (p.t?.id) api.ssh.write(p.t.id, d);
+}
+function paintBcast() {
+  const n = bcast.panes.length, on = bcast.panes.filter(p => p.chk.checked).length;
+  $('#bcastBadge').textContent = n ? `${on} of ${n} receiving` : '';
+  $('#bcastGrid').querySelector('.empty').hidden = n > 0;
+  $('#bcastAll').checked = n > 0 && on === n;
+  const bad = bcast.panes.filter(p => p.failed).length;
+  $('#bcastReconn').hidden = !bad;
+  $('#bcastReconn').replaceChildren(el('span', { className: 'reic', textContent: '⟳' }), ` Reconnect all (${bad})`);
+  $('#bcastAll').indeterminate = on > 0 && on < n;
+  for (const p of bcast.panes) p.el.classList.toggle('on', p.chk.checked && $('#bcastOn').checked);
+  bcastSave();
+}
+// Keep after restart: the pane list lives in localStorage; restored panes wait for Reconnect all.
+const bcastKeepOn = () => { try { return localStorage.getItem('bcastKeep') === 'on'; } catch { return false; } };
+function bcastSave() {
+  try {
+    localStorage.setItem('bcastKeep', $('#bcastKeep').checked ? 'on' : 'off');
+    localStorage.setItem('bcastPanes', JSON.stringify($('#bcastKeep').checked
+      ? bcast.panes.map(p => ({ id: p.s.local ? LOCAL : p.s.id, name: p.s.name, on: p.chk.checked })) : []));
+  } catch { /* not remembered */ }
+}
+$('#bcastKeep').checked = bcastKeepOn();
+$('#bcastKeep').onchange = bcastSave;
+function bcastRestore() {
+  if (!bcastKeepOn()) return;
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem('bcastPanes')) || []; } catch { /* nothing to reopen */ }
+  for (const x of list) {
+    const s = x.id === LOCAL ? { ...LOCAL_SERVER, name: x.name } : servers.find(y => y.id === x.id);
+    if (!s) continue;
+    if (s.local) bcast.localNo = Math.max(bcast.localNo, +x.name.split(' ')[1] || 0);
+    bcastAddPane(s, { connect: false, on: x.on });
+  }
+}
+// Minimized view: small panes and tiny text; double-click one to enlarge it (one at a time).
+const bcastFont = p => {
+  if (!p.t) return;
+  p.t.term.options.fontSize = bcast.mini && !p.el.classList.contains('big') ? 5 : 13;
+  p.t.refit();
+};
+function bcastMini() {
+  $('#bcastGrid').classList.toggle('mini', bcast.mini);
+  for (const p of bcast.panes) { p.el.classList.remove('big'); bcastFont(p); }
+}
+const setBcastMini = on => {
+  bcast.mini = on;
+  $('#bcastShrink').classList.toggle('on', on);
+  $('#bcastNormal').classList.toggle('on', !on);
+  bcastMini();
+};
+$('#bcastShrink').onclick = () => setBcastMini(true);
+$('#bcastNormal').onclick = () => setBcastMini(false);
+function bcastEnlarge(pane) {
+  if (!bcast.mini) return;
+  const on = !pane.el.classList.contains('big');
+  for (const p of bcast.panes) if (p.el.classList.contains('big')) { p.el.classList.remove('big'); bcastFont(p); }
+  pane.el.classList.toggle('big', on);
+  bcastFont(pane);
+  if (on) { pane.el.scrollIntoView({ block: 'nearest' }); pane.t?.term.focus(); }
+}
+$('#bcastOn').onchange = paintBcast;
+// Select all: checked when every terminal receives, dash when only some do.
+$('#bcastAll').onchange = e => { for (const p of bcast.panes) p.chk.checked = e.target.checked; paintBcast(); };
+// Add server: a tree of groups (native <details>), filtered by every field; stays open to add several.
+function bcastOptions() {
+  const f = $('#bcastQ').value.trim().toLowerCase();
+  const hit = s => !f || [s.name, s.host, s.username, s.group, s.details, s.port, ...(s.tags || [])].join(' ').toLowerCase().includes(f);
+  const tree = groupNames().map(g => {
+    const list = servers.filter(s => groupOf(s) === g && hit(s)).sort((a, b) => a.name.localeCompare(b.name));
+    if (!list.length) return null;
+    return el('details', { open: true }, tintGroup(el('summary', {}, el('span', { textContent: g }), el('small', { textContent: list.length })), g === UNGROUPED ? '' : g),
+      ...list.map(s => el('button', { type: 'button', className: 'bcitem', onclick: () => bcastAddPane(s) },
+        el('b', { textContent: s.name }), el('small', { className: 'mono', textContent: `${s.username || ''}@${s.host}` }))));
+  }).filter(Boolean);
+  $('#bcastTree').replaceChildren(...(tree.length ? tree : [el('p', { className: 'muted', textContent: 'No matching servers.' })]));
+}
+$('#bcastQ').oninput = bcastOptions;
+$('#bcastQ').onkeydown = e => { if (e.key === 'Escape') $('#bcastMenu').hidden = true; };
+$('#bcastAddBtn').onclick = () => {
+  $('#bcastMenu').hidden = !$('#bcastMenu').hidden;
+  if ($('#bcastMenu').hidden) return;
+  bcastOptions();
+  $('#bcastQ').focus();
+};
+document.addEventListener('mousedown', e => { if (!e.target.closest('.bcadd')) $('#bcastMenu').hidden = true; });
+$('#bcastLocal').onclick = () => bcastAddPane({ ...LOCAL_SERVER, name: `localhost ${++bcast.localNo}` });
+
+function bcastAddPane(s, { connect = true, on = true } = {}) {
+  const host = el('div', { className: 'xhost' });
+  const chk = el('input', { type: 'checkbox', checked: on });
+  const status = el('small', { className: 'muted' });
+  const reBtn = iconBtn('⟳', 'Reconnect this terminal', () => pane.connect(), 'x re');
+  const pane = { s, chk, connId: null, t: null, failed: false };
+  pane.setStatus = (text, cls = 'muted') => { status.textContent = text; status.className = cls; };
+  // Connection failed or dropped, or the shell ended: counted by "Reconnect failed".
+  pane.fail = (msg, cls = 'failed') => {
+    pane.failed = true;
+    pane.setStatus(msg, cls === 'failed' ? 'error' : 'muted');
+    pane.el.classList.add(cls);
+    paintBcast();
+  };
+  // (Re)connect in place: the pane, its position and its checkbox stay; the terminal starts fresh.
+  pane.connect = async () => {
+    pane.t?.dispose();
+    pane.t = null;
+    if (pane.connId && !s.local) api.ssh.disconnect(pane.connId);
+    pane.connId = null;
+    pane.failed = false;
+    pane.el.classList.remove('failed', 'idle');
+    pane.setStatus('connecting…');
+    paintBcast();
+    let connId;
+    try { connId = await api.ssh.connect(s.id); } catch (e) { return bcast.panes.includes(pane) && pane.fail(`failed: ${cleanErr(e)}`); }
+    if (!bcast.panes.includes(pane)) return s.local || api.ssh.disconnect(connId); // closed while connecting
+    pane.connId = connId;
+    pane.setStatus(s.local ? 'this computer' : `${s.username}@${s.host}`);
+    pane.t = makeTerm(host, connId, undefined, s.local ? LOCAL : s.id, { input: d => bcastSend(pane, d) });
+    bcastFont(pane);
+  };
+  chk.onchange = paintBcast;
+  pane.el = el('section', { className: 'bcpane' },
+    tintGroup(el('header', { title: 'Drag to reorder · double-click (Minimized) to enlarge' }, s.local ? el('span', { className: 'av up', title: 'This computer' }) : avMark(s.id, 'server'),
+      el('label', { className: 'chk', title: 'Receive broadcast keystrokes and scripts' }, chk, el('b', { textContent: s.name })),
+      status, el('span', { className: 'grow' }), reBtn, iconBtn('×', 'Close this terminal', () => bcastClose(pane), 'x')), s.local ? '' : s.group || ''),
+    host);
+  // Draggable only while the title bar is held, so text selection in the terminal still works.
+  pane.el.firstElementChild.onmousedown = () => { pane.el.draggable = true; };
+  pane.el.addEventListener('dragend', () => { pane.el.draggable = false; });
+  pane.el.addEventListener('mouseup', () => { pane.el.draggable = false; });
+  pane.el.addEventListener('dblclick', e => { if (!e.target.closest('button, label')) bcastEnlarge(pane); });
+  $('#bcastGrid').append(pane.el);
+  bcast.panes.push(pane);
+  paintAvail();
+  if (connect) return pane.connect();
+  pane.fail('not connected', 'idle');
+}
+function bcastClose(pane) {
+  bcast.panes.splice(bcast.panes.indexOf(pane), 1);
+  pane.t?.dispose();
+  if (pane.connId && !pane.s.local) api.ssh.disconnect(pane.connId);
+  pane.el.remove();
+  paintBcast();
+}
+// Order: drag title bars, or sort by group (Home's group order, localhost last). Kept with Keep after restart.
+const bcastReorder = () => { bcast.panes.sort((a, b) => [...$('#bcastGrid').children].indexOf(a.el) - [...$('#bcastGrid').children].indexOf(b.el)); paintBcast(); };
+dragReorder($('#bcastGrid'), '.bcpane', bcastReorder);
+$('#bcastSort').onchange = e => {
+  const by = e.target.value;
+  e.target.value = ''; // back to the label so the same order can be applied again
+  const order = groupNames();
+  const num = (x, y) => x.localeCompare(y, undefined, { numeric: true });
+  const up = p => (avail[p.s.id]?.server === 'up' ? 0 : avail[p.s.id] ? 1 : 2); // up, down, unknown
+  const key = {
+    group: p => (p.s.local ? order.length : order.indexOf(groupOf(p.s))),
+    avail: up,
+  }[by] || (() => 0);
+  const cmp = {
+    name: (a, b) => num(a.s.name, b.s.name),
+    ip: (a, b) => num(a.s.host || '', b.s.host || ''),
+  }[by] || ((a, b) => num(a.s.name, b.s.name));
+  // localhost has no IP/availability: always last
+  for (const p of [...bcast.panes].sort((a, b) => (a.s.local - b.s.local) || key(a) - key(b) || cmp(a, b))) $('#bcastGrid').append(p.el);
+  bcastReorder();
+};
+$('#bcastHelp').onclick = () => api.help.manual('broadcast');
+$('#bcastReconn').onclick = () => { for (const p of bcast.panes) if (p.failed) p.connect(); };
+// Scripts run on every checked terminal (whether or not keystroke broadcast is on).
+$('#bcastScripts').onclick = () => {
+  if (!bcast.scripts) {
+    const box = $('#scriptsTpl').content.firstElementChild.cloneNode(true);
+    $('#bcastView .bcbody').append(box);
+    box.querySelector('.sc-close').onclick = () => { box.hidden = true; $('#bcastScripts').classList.remove('on'); };
+    bcast.scripts = { box, panel: makeScriptsPanel(box, { runTitle: 'Run on every checked terminal', run: keys => {
+      const list = bcastTargets();
+      if (!list.length) return toast('No checked terminal is connected.', true);
+      for (const p of list) api.ssh.write(p.t.id, keys(p.s?.id));
+      toast(`Sent to ${list.length} terminal${list.length === 1 ? '' : 's'}`);
+    } }) };
+    bcast.scripts.box.hidden = true;
+  }
+  const { box, panel } = bcast.scripts;
+  box.hidden = !box.hidden;
+  $('#bcastScripts').classList.toggle('on', !box.hidden);
+  if (!box.hidden) panel.load();
+};
 
 // ================= server page =================
 const tailHandlers = new Map(); // tailId -> { data(chunk), end() }
@@ -915,6 +1618,7 @@ api.ssh.onHostKeyReplaced((serverId, k) => {
 
 api.ssh.onConnClosed((connId, msg) => {
   for (const v of views.values()) if (v.connId === connId) v.disconnected(msg);
+  for (const p of bcast.panes) if (p.connId === connId) p.fail(`disconnected${msg ? ': ' + msg : ''}`);
 });
 
 function closeServer(serverId) {
@@ -1050,162 +1754,16 @@ async function openServer(s) {
   });
 
   // ---- scripts side panel ----
-  let scripts = [], dragId = null;
-  const activeTags = new Set(); // show scripts having ANY of these tags
-  let sortMode = 'manual';
-  try { sortMode = localStorage.getItem('scriptSort') || 'manual'; } catch { /* default */ }
-  q('.sc-sort').value = sortMode;
-  try { q('.sc-hidebuiltin').checked = localStorage.getItem('scriptHideBuiltin') === '1'; } catch { /* default */ }
-  q('.sc-hidebuiltin').onchange = () => {
-    try { localStorage.setItem('scriptHideBuiltin', q('.sc-hidebuiltin').checked ? '1' : ''); } catch { /* ignore */ }
-    renderScripts();
-  };
-  // built-ins carry the 'built-in' tag; removing that tag makes one count as the user's
-  const shown = () => (q('.sc-hidebuiltin').checked ? scripts.filter(x => !(x.tags || []).includes('built-in')) : scripts);
-  const lastRun = () => { try { return JSON.parse(localStorage.getItem('scriptLastRun')) || {}; } catch { return {}; } };
-
-  async function loadScripts() {
-    try { scripts = await api.scripts.list(); } catch (e) { toast(cleanErr(e), true); }
-    renderScripts();
-  }
-  const toggleTag = t => { activeTags[activeTags.has(t) ? 'delete' : 'add'](t); renderScripts(); };
-
-  function renderTags() {
-    const counts = new Map();
-    for (const x of shown()) for (const t of x.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
-    for (const t of activeTags) if (!counts.has(t)) activeTags.delete(t);
-    q('.sc-tags').replaceChildren(
-      ...[...counts.keys()].sort().map(t => el('button', {
-        className: 'tchip' + (activeTags.has(t) ? ' on' : ''), title: `Show scripts tagged "${t}"`, onclick: () => toggleTag(t),
-      }, t, el('small', { textContent: counts.get(t) }))),
-      ...(activeTags.size ? [el('button', { className: 'tchip clear', textContent: '✕ Clear', onclick: () => { activeTags.clear(); renderScripts(); } })] : []));
-  }
-
-  function renderScripts() {
-    renderTags();
-    const f = q('.sc-filter').value.toLowerCase();
-    let list = shown()
-      .filter(x => !f || `${x.name} ${x.description} ${x.command} ${(x.tags || []).join(' ')}`.toLowerCase().includes(f))
-      .filter(x => !activeTags.size || (x.tags || []).some(t => activeTags.has(t)));
-    if (sortMode === 'name') list = [...list].sort((a, b) => a.name.localeCompare(b.name));
-    if (sortMode === 'recent') { const lr = lastRun(); list = [...list].sort((a, b) => (lr[b.id] || 0) - (lr[a.id] || 0)); }
-    const canDrag = sortMode === 'manual' && !f && !activeTags.size;
-    q('.sc-hint').textContent = sortMode !== 'manual' ? '' : canDrag ? 'Drag ⋮⋮ to change the order.' : 'Clear the search and tag filters to drag scripts into a new order.';
-    q('.sc-list').replaceChildren(...list.map(x => {
-      const li = el('li', { title: x.command, draggable: canDrag },
-        el('div', { className: 'sc-head' },
-          canDrag ? el('span', { className: 'grip', textContent: '⋮⋮', title: 'Drag to reorder' }) : null,
-          el('b', { textContent: x.name }),
-          x.root ? el('span', { textContent: '🔒', title: 'Runs as root (sudo)' }) : null,
-          x.confirm ? el('span', { textContent: '⏎', title: 'Waits for Enter before executing' }) : null,
-          el('span', { className: 'grow' }),
-          iconBtn('✎', 'Edit', () => editScript(x)),
-          iconBtn('🗑', 'Delete', () => deleteScript(x), 'icon danger'),
-          iconBtn('▶ Run', 'Run in the active terminal session', () => runScript(x), 'primary sm')),
-        x.description ? el('small', { textContent: x.description }) : null,
-        el('code', { className: 'mono', textContent: x.command.split('\n')[0] + (x.command.includes('\n') ? ' …' : '') }),
-        x.tags?.length ? el('div', { className: 'sc-tagrow' }, ...x.tags.map(t => el('span', {
-          className: 'tag' + (activeTags.has(t) ? ' on' : ''), textContent: t, title: `Filter by "${t}"`,
-          onclick: e => { e.stopPropagation(); toggleTag(t); },
-        }))) : null);
-      if (canDrag) {
-        li.ondragstart = e => { dragId = x.id; li.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; };
-        li.ondragend = () => { dragId = null; li.classList.remove('dragging'); };
-        li.ondragover = e => {
-          if (!dragId) return;
-          e.preventDefault();
-          const r = li.getBoundingClientRect();
-          const after = e.clientY > r.top + r.height / 2;
-          li.classList.toggle('drop-after', after);
-          li.classList.toggle('drop-before', !after);
-        };
-        li.ondragleave = () => li.classList.remove('drop-after', 'drop-before');
-        li.ondrop = async e => {
-          e.preventDefault();
-          const after = li.classList.contains('drop-after');
-          li.classList.remove('drop-after', 'drop-before');
-          if (!dragId || dragId === x.id) return;
-          const ids = scripts.map(y => y.id).filter(id => id !== dragId);
-          ids.splice(ids.indexOf(x.id) + (after ? 1 : 0), 0, dragId);
-          scripts = ids.map(id => scripts.find(y => y.id === id));
-          renderScripts();
-          try { await api.scripts.reorder(ids); } catch (err) { toast(cleanErr(err), true); loadScripts(); }
-        };
-      }
-      return li;
-    }));
-  }
-  q('.sc-sort').onchange = () => {
-    sortMode = q('.sc-sort').value;
-    try { localStorage.setItem('scriptSort', sortMode); } catch { /* ignore */ }
-    renderScripts();
-  };
-  q('.sc-restore').onclick = async () => {
-    const n = await api.scripts.restoreBuiltins();
-    toast(n ? `Restored ${n} built-in script${n === 1 ? '' : 's'}` : 'All built-in scripts are already in your list.');
-    loadScripts();
-  };
-  function runScript(x) {
-    try { localStorage.setItem('scriptLastRun', JSON.stringify({ ...lastRun(), [x.id]: Date.now() })); } catch { /* ignore */ }
-    const body = x.command.replace(/\r\n/g, '\n').trimEnd();
-    const end = x.confirm ? '' : '\r'; // confirm: leave the last line unsent so the user's Enter runs it
-    if (!body.includes('\n') && !x.root) return runInTerminal(body + end);
-    // multi-line (or root): feed through a heredoc so blocks/functions run as one script
-    const nl = body.indexOf('\n');
-    const interp = body.startsWith('#!') ? body.slice(2, nl < 0 ? undefined : nl).trim() : 'sh';
-    runInTerminal(`${x.root ? 'sudo ' : ''}${interp} -s <<'ERATERM_SCRIPT'\r${body.replace(/\n/g, '\r')}\rERATERM_SCRIPT${end}`);
-  }
-  function editScript(x = {}) {
-    const f = $('#scriptForm');
-    f.reset();
-    for (const k of ['id', 'name', 'description', 'command']) f.elements[k].value = x[k] || '';
-    f.elements.root.checked = !!x.root;
-    f.elements.confirm.checked = !!x.confirm;
-    f.elements.tags.value = (x.tags || []).join(', ');
-    // existing tags as one-click chips
-    const all = [...new Set(scripts.flatMap(y => y.tags || []))].sort();
-    $('#scriptTagPick').replaceChildren(...all.map(t => el('button', {
-      type: 'button', className: 'tchip', textContent: t,
-      onclick: () => {
-        const cur = f.elements.tags.value.split(',').map(y => y.trim()).filter(Boolean);
-        if (!cur.includes(t)) f.elements.tags.value = [...cur, t].join(', ');
-      },
-    })));
-    const dlg = $('#scriptDlg');
-    dlg.returnValue = '';
-    dlg.showModal();
-    dlg.addEventListener('close', async () => {
-      if (dlg.returnValue !== 'save') return;
-      const e = f.elements;
-      try {
-        await api.scripts.save({ id: e.id.value || undefined, name: e.name.value, description: e.description.value, command: e.command.value, tags: e.tags.value, root: e.root.checked, confirm: e.confirm.checked });
-        loadScripts();
-      } catch (err) { toast(cleanErr(err), true); }
-    }, { once: true });
-  }
-  async function deleteScript(x) {
-    if (!confirm(`Delete script "${x.name}"?`)) return;
-    await api.scripts.delete(x.id);
-    loadScripts();
-  }
+  const scBox = $('#scriptsTpl').content.firstElementChild.cloneNode(true);
+  scBox.hidden = true;
+  q('.panel.term').append(scBox);
+  const scPanel = makeScriptsPanel(scBox, { run: keys => runInTerminal(keys(s.id)), runTitle: 'Run in the active terminal session' });
   q('.tscripts').onclick = () => {
-    const p = q('.scripts');
-    p.hidden = !p.hidden;
-    q('.tscripts').classList.toggle('on', !p.hidden);
-    if (!p.hidden) loadScripts();
+    scBox.hidden = !scBox.hidden;
+    q('.tscripts').classList.toggle('on', !scBox.hidden);
+    if (!scBox.hidden) scPanel.load();
   };
-  q('.sc-close').onclick = () => { q('.scripts').hidden = true; q('.tscripts').classList.remove('on'); };
-  q('.sc-refresh').onclick = loadScripts;
-  q('.sc-add').onclick = () => editScript();
-  q('.sc-filter').oninput = renderScripts;
-  q('.sc-up').onclick = async () => {
-    try { const n = await api.scripts.import(); if (n) toast(`Imported ${n} script${n === 1 ? '' : 's'}`); loadScripts(); }
-    catch (e) { toast(`Import failed: ${cleanErr(e)}`, true); }
-  };
-  q('.sc-down').onclick = async () => {
-    try { const f = await api.scripts.export(); if (f) toast(`Exported to ${f}`); }
-    catch (e) { toast(cleanErr(e), true); }
-  };
+  scBox.querySelector('.sc-close').onclick = () => { scBox.hidden = true; q('.tscripts').classList.remove('on'); };
 
   // ---- side terminal (inside file manager) ----
   let sideTerm = null;
@@ -1938,7 +2496,8 @@ setInterval(() => {
   for (const v of views.values()) if (v.connId && (!v.root.hidden || v.hasAlerts?.())) v.pollMetrics();
 }, 5000);
 
-refreshServers().then(() => {
+loadAcct().then(refreshServers).then(() => {
+  bcastRestore();
   if (!restoreTabsOn()) return;
   let ids = [];
   try { ids = JSON.parse(localStorage.getItem('openTabs')) || []; } catch { /* nothing to reopen */ }
@@ -1976,3 +2535,128 @@ document.addEventListener('pointerdown', e => {
 document.addEventListener('click', e => {
   if (e.target.closest('.fold')) setFolded(!document.body.classList.contains('folded'));
 });
+
+// ================= footer: quick toggles =================
+$('#ftMenu').onclick = () => setFolded(!document.body.classList.contains('folded'));
+
+// ================= side menu sections: click a heading to fold it =================
+{
+  let shut = [];
+  try { shut = JSON.parse(localStorage.getItem('navShut')) || []; } catch { /* all open */ }
+  for (const h of document.querySelectorAll('h6.navsec')) {
+    const grp = document.querySelector(`.navgrp[data-grp="${h.dataset.sec}"]`);
+    const paint = () => { grp.classList.toggle('closed', shut.includes(h.dataset.sec)); h.classList.toggle('closed', shut.includes(h.dataset.sec)); };
+    h.onclick = () => {
+      shut = shut.includes(h.dataset.sec) ? shut.filter(x => x !== h.dataset.sec) : [...shut, h.dataset.sec];
+      try { localStorage.setItem('navShut', JSON.stringify(shut)); } catch { /* not remembered */ }
+      paint();
+    };
+    paint();
+  }
+}
+
+// ================= Environments page: environments → groups → servers =================
+// Delete warning: what goes and what stays, one fact per line.
+function confirmDeleteEnv(e) {
+  const nGroups = [...new Set([...savedGroups, ...servers.map(s => s.group).filter(Boolean)])].filter(g => envOfGroup(g) === e.id).length;
+  const nServers = servers.filter(s => envOfServer(s) === e.id).length;
+  const line = (k, v, cls = '') => el('div', { className: 'delrow ' + cls }, el('span', { textContent: k }), el('b', { textContent: v }));
+  return ask({ title: `Delete environment "${e.name}"?`, danger: true, ok: 'Delete environment', body: [
+    el('div', { className: 'delbox' },
+      line('Groups', String(nGroups)), line('Servers', String(nServers)), line('Parameters', String(Object.keys(e.vars || {}).length), 'gone')),
+    el('p', { className: 'hint', textContent: `The environment and its parameters are deleted. Its groups and servers move to "${envById('local')?.name}". No servers are deleted.` }),
+  ] });
+}
+async function deleteEnv(e) {
+  if (!await confirmDeleteEnv(e)) return;
+  try { await api.envs.delete(e.id); toast(`Environment ${e.name} deleted`); await refreshServers(); } catch (err) { toast(cleanErr(err), true); }
+}
+async function moveGroup(g, envId) {
+  try { await api.groups.save(g, g, groupColors[g] || '', envId); toast(`Group ${g} moved to ${envById(envId)?.name}`); await refreshServers(); } catch (err) { toast(cleanErr(err), true); }
+}
+// Environments page state: cards start folded; groups inside start open.
+const stop = fn => ev => { ev.stopPropagation(); fn(ev); }; // header buttons must not also fold the card
+const envUi = { open: new Set(), shut: new Set(), q: '', sort: '' };
+function renderEnvPage() {
+  $('#envsBadge').textContent = `${envs.list.length}`;
+  const allGroups = [...new Set([...savedGroups, ...servers.map(s => s.group).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
+  const q = envUi.q;
+  const has = (...v) => v.some(x => String(x || '').toLowerCase().includes(q));
+  const srvMatch = s => has(s.name, s.host, s.group, s.details, ...(s.tags || []));
+  const info = e => {
+    const names = allGroups.filter(g => envOfGroup(g) === e.id);
+    return { e, names, loose: servers.filter(s => !s.group && envOfServer(s) === e.id), total: servers.filter(s => envOfServer(s) === e.id).length };
+  };
+  let rows = envs.list.map(info);
+  if (q) rows = rows.filter(r => has(r.e.name, r.e.description) || r.names.some(g => has(g)) || servers.some(s => envOfServer(s) === r.e.id && srvMatch(s)));
+  const by = { name: (a, b) => a.e.name.localeCompare(b.e.name), servers: (a, b) => b.total - a.total || a.e.name.localeCompare(b.e.name), groups: (a, b) => b.names.length - a.names.length || a.e.name.localeCompare(b.e.name) }[envUi.sort];
+  if (by) rows.sort(by);
+  const chips = list => el('div', { className: 'envsrv' }, ...(list.length ? list.map(s => el('span', { className: 'dchip on', title: s.host },
+    el('b', { textContent: s.name }), el('small', { className: 'mono', textContent: s.host }))) : [el('small', { className: 'muted', textContent: 'no servers' })]));
+  $('#envsList').replaceChildren(...(rows.length ? rows.map(({ e, names, loose, total }) => {
+    const open = envUi.open.has(e.id) || !!q; // a search opens the matches
+    const nGroups = `${names.length} group${names.length === 1 ? '' : 's'}`, nSrv = `${total} server${total === 1 ? '' : 's'}`;
+    const groupRows = names.map(g => {
+      const shut = envUi.shut.has(e.id + '|' + g), members = servers.filter(s => s.group === g);
+      const sel = el('select', { title: 'Move this group to another environment', disabled: e.id === 'team', onclick: ev => ev.stopPropagation() },
+        ...envs.list.filter(x => x.id !== 'team' || e.id === 'team').map(x => el('option', { value: x.id, textContent: `${envIcon(x)} ${x.name}` })));
+      sel.value = e.id;
+      sel.onchange = () => moveGroup(g, sel.value);
+      return tintGroup(el('div', { className: 'envgrow' },
+        el('div', { className: 'envghead', onclick: () => { const k = e.id + '|' + g; envUi.shut.has(k) ? envUi.shut.delete(k) : envUi.shut.add(k); renderEnvPage(); } },
+          el('span', { className: 'caret', textContent: shut ? '▸' : '▾' }), el('b', { textContent: g }),
+          el('small', { className: 'muted', textContent: `${members.length} server${members.length === 1 ? '' : 's'}` }),
+          el('span', { className: 'grow' }), sel,
+          iconBtn('✎', `Edit group ${g}`, stop(() => editGroup(g)))),
+        shut ? null : chips(q ? members.filter(s => !has(g) && !has(e.name) ? srvMatch(s) : true) : members)), g);
+    });
+    const card = el('section', { className: 'dcard envcard' + (open ? '' : ' folded') },
+      el('header', { className: 'envhead', onclick: () => { envUi.open.has(e.id) ? envUi.open.delete(e.id) : envUi.open.add(e.id); renderEnvPage(); } },
+        el('span', { className: 'caret', textContent: open ? '▾' : '▸' }),
+        el('b', { textContent: `${envIcon(e)} ${e.name}` }),
+        el('small', { className: 'muted', textContent: `${nGroups} · ${nSrv}` }),
+        el('span', { className: 'grow' }),
+        ...(e.id === 'team' ? [] : [iconBtn('＋', 'New group in this environment', stop(() => editGroup('', e.id)))]),
+        iconBtn('✎', 'Edit environment (name, description, color, parameters)', stop(() => editEnv(e.id))),
+        ...(!e.builtin ? [iconBtn('🗑', 'Delete environment', stop(() => deleteEnv(e)), 'icon danger')] : [])),
+      // folded: short summary line (description, group names)
+      !open ? el('div', { className: 'envsum' },
+        e.description ? el('span', { textContent: e.description }) : null,
+        el('small', { className: 'muted', textContent: [names.length ? `Groups: ${names.slice(0, 6).join(', ')}${names.length > 6 ? ` +${names.length - 6}` : ''}` : 'No groups', loose.length ? `${loose.length} ungrouped` : ''].filter(Boolean).join(' · ') })) : null,
+      open && e.description ? el('p', { className: 'envdesc', textContent: e.description }) : null,
+      open && names.length ? el('div', { className: 'envlinks' },
+        el('a', { href: '#', textContent: 'Collapse all', onclick: ev => { ev.preventDefault(); names.forEach(g => envUi.shut.add(e.id + '|' + g)); renderEnvPage(); } }), ' · ',
+        el('a', { href: '#', textContent: 'Expand all', onclick: ev => { ev.preventDefault(); names.forEach(g => envUi.shut.delete(e.id + '|' + g)); renderEnvPage(); } })) : null,
+      ...(open ? groupRows : []),
+      open && loose.length ? el('div', { className: 'envgrow' }, el('div', { className: 'envghead' }, el('b', { textContent: 'Ungrouped' })), chips(loose)) : null,
+      open && !groupRows.length && !loose.length ? el('small', { className: 'muted', textContent: 'Empty.' }) : null);
+    card.style.setProperty('--ec', e.color || 'var(--line)');
+    return card;
+  }) : [el('p', { className: 'empty', textContent: 'No environment matches.' })]));
+}
+$('#envsQ').oninput = e => { envUi.q = e.target.value.trim().toLowerCase(); renderEnvPage(); };
+$('#envsSort').onchange = e => { envUi.sort = e.target.value; renderEnvPage(); };
+$('#envsFoldAll').onclick = () => { envUi.open.clear(); renderEnvPage(); };
+$('#envsUnfoldAll').onclick = () => { envUi.open = new Set(envs.list.map(e => e.id)); renderEnvPage(); };
+$('#envsNew').onclick = () => editEnv(null);
+$('#envsNewGroup').onclick = () => editGroup();
+
+// ================= footer: account (left) =================
+function paintAcct() {
+  const a = acctInfo, box = $('#ftAcct');
+  if (!box) return;
+  if (!a.signedIn) {
+    box.replaceChildren(el('button', { title: a.configured ? 'Sign in or sign up with Google' : 'Account settings', textContent: '👤 Sign in / Sign up',
+      onclick: async e => {
+        if (!a.configured) { await openSettings(); return settingsTab('account'); }
+        e.currentTarget.disabled = true;
+        try { toast('Finish signing in in your browser…'); acctInfo = await api.account.signIn(); } catch (err) { toast(cleanErr(err), true); }
+        paintAcct();
+      } }));
+    return;
+  }
+  box.replaceChildren(el('span', { className: 'ftuser', title: a.email, textContent: `👤 ${a.name || (a.email || '').split('@')[0]}` }),
+    el('button', { title: 'Account settings: sign out or change settings', textContent: '⎋',
+      onclick: async () => { await openSettings(); settingsTab('account'); } }));
+}
+paintAcct();
