@@ -164,7 +164,42 @@ function remoteDir(d) {
   return shq(d);
 }
 
+// ---- script variables: {{name}} in a script; the script's local value wins over the global one ----
+const VAR_RE = /\{\{\s*([A-Za-z_]\w*)\s*\}\}/g; // ponytail: {{.Names}} / {{json .X}} (docker/go templates) never match
+// "name=value" lines <-> { name: value }. Blank lines and # comments are skipped.
+function parseVars(text) {
+  const out = {};
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Za-z_]\w*)\s*=(.*)$/);
+    if (m) out[m[1]] = m[2].trim();
+  }
+  return out;
+}
+const varsText = v => Object.entries(v || {}).map(([k, x]) => `${k}=${x}`).join('\n');
+// Returns { text, missing }: unknown names stay as they are and are listed in missing.
+function fillVars(text, local = {}, global = {}) {
+  const missing = new Set();
+  const out = String(text).replace(VAR_RE, (all, k) => {
+    if (Object.hasOwn(local, k)) return local[k];
+    if (Object.hasOwn(global, k)) return global[k];
+    missing.add(k);
+    return all;
+  });
+  return { text: out, missing: [...missing] };
+}
+// What Run types into a terminal for a script (variables already filled in).
+function scriptKeys(body, { root = false, confirm = false } = {}) {
+  body = String(body).replace(/\r\n/g, '\n').trimEnd();
+  const end = confirm ? '' : '\r'; // confirm: leave the last line unsent so the user's Enter runs it
+  if (!body.includes('\n') && !root) return body + end;
+  // multi-line (or root): feed through a heredoc so blocks/functions run as one script
+  const nl = body.indexOf('\n');
+  const interp = body.startsWith('#!') ? body.slice(2, nl < 0 ? undefined : nl).trim() : 'sh';
+  return `${root ? 'sudo ' : ''}${interp} -s <<'ERATERM_SCRIPT'\r${body.replace(/\n/g, '\r')}\rERATERM_SCRIPT${end}`;
+}
+
 if (typeof module !== 'undefined') module.exports = {
+  parseVars, varsText, fillVars, scriptKeys,
   shq, logLevel, parseLogTime, logRowVisible, fileKind, buildRdp, remoteDir,
   AI_PROVIDERS, validModel, normModel, parseCliModels, buildAiRequest, parseAiResponse, buildModelsRequest, parseModels, hostKeyDecision,
 };

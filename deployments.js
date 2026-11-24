@@ -1,4 +1,4 @@
-/* global api, el, $, iconBtn, toast, cleanErr, servers, notify */
+/* global api, el, $, iconBtn, toast, cleanErr, servers, notify, fillVars */
 // Deployments panel: edit saved deployments, run them on many servers, watch per-server progress.
 // Runs happen in main (deploy.js); this file only edits definitions and renders events.
 
@@ -39,7 +39,7 @@ const D_ICON = { ok: '✓', warn: '!', failed: '✕', skipped: '–' };
 const D_FINAL = ['success', 'warning', 'failed', 'cancelled', 'skipped'];
 
 function initDeployments(panel) {
-  let list = [], cur = null, dirty = false, lib = [];
+  let list = [], cur = null, dirty = false, lib = [], libVars = {};
   let shown = null; // run whose status view is on screen
   const tFilter = { group: null, q: '' }; // target-server filter (view only, not saved)
   const runs = new Map(); // deploymentId -> last run (kept so its status can be reopened)
@@ -48,7 +48,7 @@ function initDeployments(panel) {
 
   // ---------- list ----------
   async function load(selectId) {
-    try { [list, lib] = await Promise.all([api.deploy.list(), api.scripts.list()]); } catch (e) { toast(cleanErr(e), true); }
+    try { [list, lib, libVars] = await Promise.all([api.deploy.list(), api.scripts.list(), api.scripts.globals()]); } catch (e) { toast(cleanErr(e), true); }
     const pick = list.find(d => d.id === selectId);
     if (pick) select(pick, true);
     else if (!cur && !shown) renderEmpty();
@@ -269,7 +269,11 @@ function initDeployments(panel) {
       ...lib.map(x => el('option', { value: x.id, textContent: x.name })));
     lib$.onchange = () => {
       const x = lib.find(y => y.id === lib$.value);
-      if (x) { st.command = st.command.trim() ? `${st.command.replace(/\n+$/, '')}\n${x.command}` : x.command; rerender(); }
+      if (!x) return;
+      const { text, missing } = fillVars(x.command, x.vars || {}, libVars); // variables are filled in when the script is copied
+      if (missing.length) toast(`Not defined, left as is: ${missing.map(k => `{{${k}}}`).join(' ')}`, true);
+      st.command = st.command.trim() ? `${st.command.replace(/\n+$/, '')}\n${text}` : text;
+      rerender();
     };
     const t = el('textarea', { className: 'mono', spellcheck: false, rows: Math.min(12, Math.max(2, st.command.split('\n').length)), placeholder: 'command, or a multi-line script (#!/bin/bash supported)' });
     t.value = st.command;

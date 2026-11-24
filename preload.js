@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('api', {
   servers: {
     list: () => ipcRenderer.invoke('servers:list'),
     save: s => ipcRenderer.invoke('servers:save', s),
+    import: () => ipcRenderer.invoke('servers:import'),
+    export: () => ipcRenderer.invoke('servers:export'),
     delete: id => ipcRenderer.invoke('servers:delete', id),
     setLogPaths: (id, paths) => ipcRenderer.invoke('servers:setLogPaths', id, paths),
     setAlerts: (id, alerts) => ipcRenderer.invoke('servers:setAlerts', id, alerts),
@@ -34,12 +36,17 @@ contextBridge.exposeInMainWorld('api', {
     get: () => ipcRenderer.invoke('avail:get'),
     onUpdate: on('avail:update'),
   },
+  actions: {
+    all: () => ipcRenderer.invoke('actions:all'),
+    onAction: on('log:action'),
+  },
   log: {
     all: () => ipcRenderer.invoke('log:all'),
     clear: () => ipcRenderer.send('log:clear'),
     openFolder: () => ipcRenderer.invoke('log:openFolder'),
     openConsole: () => ipcRenderer.send('log:openConsole'),
     onLine: on('log:line'),
+    debug: on => ipcRenderer.invoke('log:debug', on), // on: true/false sets it, undefined reads it
   },
   ssh: {
     connect: serverId => ipcRenderer.invoke('ssh:connect', serverId),
@@ -85,7 +92,10 @@ contextBridge.exposeInMainWorld('api', {
     restoreBuiltins: () => ipcRenderer.invoke('scripts:restoreBuiltins'),
     import: () => ipcRenderer.invoke('scripts:import'),
     export: () => ipcRenderer.invoke('scripts:export'),
+    globals: () => ipcRenderer.invoke('scripts:globals'),
+    setGlobals: v => ipcRenderer.invoke('scripts:setGlobals', v),
   },
+  help: { manual: hash => ipcRenderer.invoke('help:manual', hash) },
   deploy: {
     list: () => ipcRenderer.invoke('deploy:list'),
     save: d => ipcRenderer.invoke('deploy:save', d),
@@ -99,6 +109,7 @@ contextBridge.exposeInMainWorld('api', {
   remote: { open: serverId => ipcRenderer.invoke('remote:open', serverId) },
   ai: {
     suggest: (connId, req) => ipcRenderer.invoke('ai:suggest', connId, req),
+    script: a => ipcRenderer.invoke('ai:script', a), // { request, script: {name, description, command, vars}, globals: [names] }
     analyze: (connId, a) => ipcRenderer.invoke('ai:analyze', connId, a), // { kind: 'logs'|'terminal', question, text, source }
     models: a => ipcRenderer.invoke('ai:models', a), // { provider, key? }
     test: a => ipcRenderer.invoke('ai:test', a),     // { provider, key?, model? }

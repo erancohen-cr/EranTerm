@@ -21,6 +21,8 @@
   nav a { display: block; color: var(--accent); text-decoration: none; }
   a { color: var(--accent); }
   kbd, code { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font: 12px ui-monospace, Menlo, monospace; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow: auto; }
+  pre code { border: 0; padding: 0; background: none; }
   .note { border-left: 3px solid var(--accent); background: var(--panel); padding: 8px 12px; border-radius: 0 6px 6px 0; }
 </style>
 </head>
@@ -36,6 +38,8 @@
     <a href="#rdp">Windows &amp; RDP</a>
     <a href="#files">File Manager</a>
     <a href="#term">Terminal &amp; scripts</a>
+    <a href="#scripting">Writing scripts (variables)</a>
+    <a href="#broadcast">Broadcast (many terminals)</a>
     <a href="#logs">Logs</a>
     <a href="#metrics">Metrics &amp; alerts</a>
     <a href="#deploy">Deployments</a>
@@ -89,7 +93,60 @@
   <ul>
     <li>A full shell. You can open several sessions per server.</li>
     <li>As you type, command suggestions come from this server's history and from common commands.</li>
-    <li><b>Scripts</b>: a searchable library of commands and multi-line scripts, with tags. Click one to run it in the terminal. You can import and export scripts (<code>.json</code>, <code>.sh</code>, <code>.txt</code>), and re-add any built-in scripts you deleted. Tick <b>Run as root</b> on a script to run it with <code>sudo</code> (marked 🔒); sudo asks for the password in the terminal unless the user has passwordless sudo. Tick <b>Wait for Enter</b> (marked ⏎) to have Run type the script into the terminal without executing it; press Enter to run it. <b>Hide built-in scripts</b> shows only the scripts you added; the choice is remembered.</li>
+    <li><b>Scripts</b>: a searchable library of commands and multi-line scripts, with tags. Click one to run it in the terminal. Scripts can use <a href="#scripting">variables</a>; manage them all in <b>Scripts</b> on the Home page. You can import and export scripts (<code>.json</code>, <code>.sh</code>, <code>.txt</code>), and re-add any built-in scripts you deleted. Tick <b>Run as root</b> on a script to run it with <code>sudo</code> (marked 🔒); sudo asks for the password in the terminal unless the user has passwordless sudo. Tick <b>Wait for Enter</b> (marked ⏎) to have Run type the script into the terminal without executing it; press Enter to run it. <b>Hide built-in scripts</b> shows only the scripts you added; the choice is remembered.</li>
+  </ul>
+
+  <h2 id="scripting">Writing scripts</h2>
+  <p>Manage scripts in <b>Scripts</b> on the Home page (or <b>{ } Scripts</b> in any terminal). Run them from a server Terminal or from <a href="#broadcast">Broadcast</a>.</p>
+  <h3>One line or many</h3>
+  <ul>
+    <li>A one-line script is typed into the terminal as is, followed by Enter: <code>df -h</code>.</li>
+    <li>A multi-line script runs as one script through <code>sh</code>, so loops, <code>if</code> blocks and functions work. Start it with a <code>#!</code> line to pick another interpreter, for example <code>#!/bin/bash</code> or <code>#!/usr/bin/env python3</code>.</li>
+    <li><b>Run as root</b> runs it with <code>sudo</code>. <b>Wait for Enter</b> types it without running it, so you can check it first.</li>
+  </ul>
+  <h3>Ask AI</h3>
+  <ul>
+    <li>At the top of the New / Edit script form, describe what the script should do (or what to change in the current one) and click <b>✦ Ask AI</b> or press Enter.</li>
+    <li>The AI returns a proposal: a short plan, the script, suggested local variables and a risk level. Nothing changes until you click <b>Apply to form</b>.</li>
+    <li>Apply replaces the script text, adds the suggested local variables, sets Run as root, and fills Name, Description and Tags only if they are empty. Review it before saving.</li>
+    <li>Your request, the current name, description and script, and the <i>names</i> of your variables are sent to the AI provider set in Settings → AI configuration. Variable values are not sent.</li>
+  </ul>
+  <h3>Variables</h3>
+  <p>Write <code>{{name}}</code> anywhere in a script. When you click Run, EranTerm replaces it with the variable's value. Names use letters, digits and <code>_</code>, and start with a letter or <code>_</code>.</p>
+  <ul>
+    <li><b>Local variables</b> belong to one script. Set them in that script's <i>Local variables</i> box.</li>
+    <li><b>Global variables</b> are one list shared by every script. The <i>Global variables</i> box shows the same list in every script; changing it there changes it for all scripts.</li>
+    <li>If a script has a local variable with the same name as a global one, the local value wins.</li>
+    <li>Write one variable per line as <code>name=value</code>. Blank lines and lines starting with <code>#</code> are ignored. Everything after the first <code>=</code> is the value (spaces at both ends are trimmed).</li>
+    <li>The value is inserted as plain text, exactly as written. Add quotes in the script if a value may contain spaces: <code>cd "{{app_dir}}"</code>.</li>
+    <li>A <code>{{name}}</code> with no value is left as is and you get a warning. The editor shows which variables a script uses and which are missing.</li>
+    <li>Template syntax such as Docker's <code>{{.Names}}</code> or <code>{{json .Config}}</code> is not a variable and is never changed.</li>
+    <li>When you copy a library script into a <a href="#deploy">Deployment</a>, its variables are filled in at that moment.</li>
+  </ul>
+  <p>Example. Global: <code>env=staging</code>. Local: <code>service=nginx</code> and <code>lines=50</code>. Script:</p>
+  <pre><code>#!/bin/bash
+echo "[{{env}}] restarting {{service}}"
+sudo systemctl restart {{service}}
+journalctl -u {{service}} -n {{lines}} --no-pager</code></pre>
+  <h3>Tags and filtering</h3>
+  <ul>
+    <li>Give scripts comma-separated tags. Click tags above the list to filter.</li>
+    <li>With two or more tags selected, choose how they combine: <b>Any selected tag (OR)</b> shows scripts that have at least one of them; <b>All selected tags (AND)</b> shows only scripts that have every one. The choice is remembered.</li>
+  </ul>
+
+  <h2 id="broadcast">Broadcast</h2>
+  <p>Type the same thing into many terminals at once. Open <b>Broadcast</b> on the Home page.</p>
+  <ul>
+    <li><b>＋ Add server…</b> opens a terminal to a saved server. <b>＋ localhost</b> opens a terminal on this computer; add as many as you like, for example to <code>ssh</code> to machines that are not saved.</li>
+    <li>Every key you type in a <b>checked</b> terminal (including Ctrl keys, arrows and paste) goes to all checked terminals. Checked terminals have a green border.</li>
+    <li>Uncheck a terminal to type into it alone, for example to answer a password prompt on one server. Turn off <b>Broadcast keystrokes</b> to type into each terminal separately.</li>
+    <li><b>{ } Scripts</b> runs a script on every checked terminal, with its variables filled in.</li>
+    <li>Each terminal has its own connection; closing it (×) disconnects only that one.</li>
+    <li>A terminal whose connection failed or dropped, or whose shell ended, gets a red border. Click its <b>⟳</b> to reconnect it in place (the checkbox and position stay). <b>⟳ Reconnect all (n)</b> at the top reconnects every failed or not-yet-connected Broadcast terminal at once; it only touches Broadcast, not server tabs.</li>
+    <li>Order the terminals by dragging a terminal's title bar onto another position (works in normal and Minimized view), or click <b>⇅ Sort by group</b> to order them by server group (same order as the Home page, localhost last). The title bar takes its group's color.</li>
+    <li>The dot before each terminal's name shows the server's availability (green = up, red = not answering, grey = not checked).</li>
+    <li><b>Minimized</b> shrinks every terminal and its text so many fit on screen. Double-click a terminal to enlarge it for typing (the rest stay small); double-click it again, or another one, to switch. Uncheck Minimized to return all to normal.</li>
+    <li><b>Keep after restart</b> reopens the same Broadcast terminals (and their checkboxes) next time the app starts. They are not connected automatically: click <b>⟳ Reconnect all</b> to connect them.</li>
   </ul>
 
   <h2 id="logs">Logs</h2>
@@ -159,7 +216,12 @@
   <h3>Logging</h3>
   <ul>
     <li>Optionally save the app log to <code>eranterm.log</code> in a folder you choose (default: <code>~/Library/Logs/EranTerm</code> on macOS).</li>
-    <li><b>Debug Console</b>: a live view of the app log. Open it with the <b>›_ Console</b> button in the side menu, from Settings, or with <kbd>Ctrl/⌘ + Shift + L</kbd>.</li>
+    <li><b>Log Console</b>: open it with the <b>›_ Log Console</b> button in the side menu, from Settings, or with <kbd>Ctrl/⌘ + Shift + L</kbd>. It has two tabs:
+      <ul>
+        <li><b>▤ Log</b>: a live view of the app log, with a filter and a level picker. <b>Debug level</b> also logs every internal call and extra detail; it is off by default and turns off again when the app restarts.</li>
+        <li><b>★ Action Log</b>: the audit trail. Every server, user, group, script and deployment you create, change or delete; settings changes; connections and remote desktops; file uploads, downloads, deletes and new folders; killed processes; maintenance actions; and deployment runs. Each row has the time, the action, the target, details and whether it worked (failed actions show the error in red). Filter by text or action type, show failed actions only, or <b>Copy CSV</b>. The Action Log is saved in <code>actions.jsonl</code> in the data folder and kept across restarts. Passwords, keys and file contents are never recorded.</li>
+      </ul>
+    </li>
   </ul>
   <h3>AI</h3>
   <ul>

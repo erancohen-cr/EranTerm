@@ -22,10 +22,12 @@
         <button class="navitem" id="navFav" title="Favorites"><i>☆</i><span class="lbl">Favorites</span><span class="count lbl" id="favCount"></span></button>
         <button class="navitem" id="navUsers" title="Users"><i>👤</i><span class="lbl">Users</span><span class="count lbl" id="userCount"></span></button>
         <button class="navitem" id="navDeploy" title="Deployments"><i>🚀</i><span class="lbl">Deployments</span></button>
+        <button class="navitem" id="navScripts" title="Scripts"><i>{ }</i><span class="lbl">Scripts</span></button>
+        <button class="navitem" id="navBcast" title="Broadcast: type into many terminals at once"><i>📡</i><span class="lbl">Broadcast</span></button>
         <h6 class="lbl navhead">Groups <button id="newGroupBtn" class="icon" title="New group">＋</button></h6>
         <div id="navGroups" class="navgroups"></div>
         <span class="grow"></span>
-        <button class="navitem" id="consoleBtn" title="Debug Console (Ctrl/⌘ + Shift + L)"><i>›_</i><span class="lbl">Console</span></button>
+        <button class="navitem" id="consoleBtn" title="Log Console: app log and Action Log (Ctrl/⌘ + Shift + L)"><i>›_</i><span class="lbl">Log Console</span></button>
         <button class="navitem" id="settingsBtn" title="Settings"><i>⚙</i><span class="lbl">Settings</span></button>
       </aside>
       <div class="content">
@@ -33,6 +35,8 @@
           <header class="pagehead">
             <h1 id="homeTitle">All Servers</h1><span class="badge" id="countBadge"></span>
             <span class="grow"></span>
+            <button id="srvImport" title="Import servers (.json)">⤒ Import</button>
+            <button id="srvExport" title="Export servers (.json, without passwords)">⤓ Export</button>
             <button id="collapseAll" title="Collapse all groups">⊟ Collapse all</button>
             <button id="expandAll" title="Expand all groups">⊞ Expand all</button>
             <input id="filter" class="search" placeholder="Search servers, IPs, users, tags…">
@@ -54,6 +58,39 @@
           <div class="deditor"></div>
         </div>
 
+        </div>
+        <div id="scriptsView" hidden>
+          <header class="pagehead">
+            <h1>Scripts</h1><button id="scriptsManual" class="sc-help icon" title="Script writing manual (variables, multi-line, root)">?</button>
+            <span class="grow"></span>
+          </header>
+          <p class="muted">Saved commands you can run from any terminal (server Terminal → { } Scripts, or Broadcast). Use {{name}} for variables.</p>
+        </div>
+        <div id="bcastView" hidden>
+          <header class="pagehead">
+            <h1>Broadcast</h1><button id="bcastHelp" class="sc-help icon" title="How Broadcast works (manual)">?</button><span class="badge" id="bcastBadge"></span>
+            <span class="grow"></span>
+            <button id="bcastReconn" hidden title="Reconnect every Broadcast terminal that failed, dropped or is not connected yet"></button>
+            <div class="bcadd">
+              <button id="bcastAddBtn" title="Add a terminal to a saved server">＋ Add server… ▾</button>
+              <div id="bcastMenu" class="bcmenu" hidden>
+                <input id="bcastQ" class="search" placeholder="Filter: name, IP, user, group, tags, details…" autocomplete="off">
+                <div id="bcastTree"></div>
+              </div>
+            </div>
+            <button id="bcastLocal" title="Add a terminal on this computer (connect to anything by hand)">＋ localhost</button>
+            <button id="bcastSort" title="Order terminals by server group (localhost last). Drag a terminal's title bar to order by hand">⇅ Sort by group</button>
+            <button id="bcastScripts" class="tscripts" title="Run a script on every checked terminal">{ } Scripts</button>
+          </header>
+          <div class="bcopts">
+            <label class="chk" title="Check or uncheck every terminal"><input type="checkbox" id="bcastAll"> Select all</label>
+            <label class="chk" title="Off: each terminal gets only what you type into it"><input type="checkbox" id="bcastOn" checked> Broadcast keystrokes</label>
+            <label class="chk" title="Shrink every terminal and its text. Double-click a terminal to enlarge it for typing"><input type="checkbox" id="bcastMini"> Minimized</label>
+            <label class="chk" title="Reopen these terminals next time the app starts (not connected until you click Reconnect all)"><input type="checkbox" id="bcastKeep"> Keep after restart</label>
+          </div>
+          <div class="bcbody">
+            <div id="bcastGrid" class="bcgrid"><p class="empty">Add servers or localhost terminals to start.</p></div>
+          </div>
         </div>
         <div id="usersView" hidden>
           <header class="pagehead">
@@ -228,29 +265,6 @@
             <p class="aiError error"></p>
           </section>
           </div>
-          <aside class="scripts" hidden>
-            <header>
-              <b>Scripts</b><span class="grow"></span>
-              <button class="sc-up icon" title="Import scripts (.json, .sh, .txt)">⤒</button>
-              <button class="sc-down icon" title="Export scripts (.json)">⤓</button>
-              <button class="sc-refresh icon" title="Refresh">⟳</button>
-              <button class="sc-add icon" title="New script">＋</button>
-              <button class="sc-close icon" title="Close">×</button>
-            </header>
-            <div class="sc-tools">
-              <input class="sc-filter search" placeholder="Search scripts…">
-              <select class="sc-sort" title="Order">
-                <option value="manual">My order</option>
-                <option value="name">Name A–Z</option>
-                <option value="recent">Recently run</option>
-              </select>
-            </div>
-            <label class="chk"><input type="checkbox" class="sc-hidebuiltin"> Hide built-in scripts</label>
-            <div class="sc-tags"></div>
-            <small class="sc-hint muted"></small>
-            <ul class="sc-list"></ul>
-            <button class="sc-restore linkbtn" title="Re-add built-in scripts you deleted">↺ Restore built-in scripts</button>
-          </aside>
         </div>
 
         <!-- Logs -->
@@ -315,6 +329,40 @@
     </section>
   </template>
 
+  <!-- ===== Scripts panel (cloned into server Terminal, home Scripts, Broadcast) ===== -->
+  <template id="scriptsTpl">
+    <aside class="scripts">
+      <header>
+        <b>Scripts</b><span class="grow"></span>
+        <button class="sc-help icon" title="Script writing manual (variables, multi-line, root)">?</button>
+        <button class="sc-up icon" title="Import scripts (.json, .sh, .txt)">⤒</button>
+        <button class="sc-down icon" title="Export scripts (.json)">⤓</button>
+        <button class="sc-refresh icon" title="Refresh">⟳</button>
+        <button class="sc-add icon" title="New script">＋</button>
+        <button class="sc-close icon" title="Close">×</button>
+      </header>
+      <div class="sc-tools">
+        <input class="sc-filter search" placeholder="Search scripts…">
+        <select class="sc-sort" title="Order">
+          <option value="manual">My order</option>
+          <option value="name">Name A–Z</option>
+          <option value="recent">Recently run</option>
+        </select>
+      </div>
+      <label class="chk"><input type="checkbox" class="sc-hidebuiltin"> Hide built-in scripts</label>
+      <div class="sc-tagbar">
+        <select class="sc-tagmode" title="How the selected tags combine" hidden>
+          <option value="or">Any selected tag (OR)</option>
+          <option value="and">All selected tags (AND)</option>
+        </select>
+        <div class="sc-tags"></div>
+      </div>
+      <small class="sc-hint muted"></small>
+      <ul class="sc-list"></ul>
+      <button class="sc-restore linkbtn" title="Re-add built-in scripts you deleted">↺ Restore built-in scripts</button>
+    </aside>
+  </template>
+
   <div id="toast" hidden></div>
 
   <dialog id="serverDlg">
@@ -353,13 +401,27 @@
     <form method="dialog" id="scriptForm">
       <h3>Script</h3>
       <input type="hidden" name="id">
+      <div class="aibox">
+        <div class="laiForm">
+          <input id="scriptAiQ" autocomplete="off" placeholder="Ask AI: describe the script, e.g. back up /etc/nginx, then reload nginx if the config test passes">
+          <button type="button" id="scriptAiBtn" class="laiBtn" title="Plan or improve this script with AI (sends your request and the current script, not variable values)">✦ Ask AI</button>
+        </div>
+        <div id="scriptAiOut" class="aiOut" hidden></div>
+      </div>
       <label>Name <input name="name" required></label>
       <label>Description <input name="description"></label>
       <label>Tags <input name="tags" placeholder="comma separated, e.g. disk, linux"></label>
       <div id="scriptTagPick" class="sc-tags"></div>
       <label>Command or script <textarea name="command" class="mono" rows="9" required spellcheck="false" placeholder="df -h&#10;# multi-line scripts run with sh (or the #! interpreter)"></textarea></label>
-      <label class="row"><input name="root" type="checkbox"> Run as root (sudo; it asks for the password in the terminal unless sudo is passwordless)</label>
-      <label class="row"><input name="confirm" type="checkbox"> Wait for Enter (Run types it into the terminal; press Enter to execute)</label>
+      <label class="row"><input name="root" type="checkbox"> Run as root <span class="qhelp" tabindex="0" data-tip="Runs the script through sudo. It asks for the password in the terminal unless sudo is passwordless for this user.">?</span></label>
+      <label class="row"><input name="confirm" type="checkbox"> Wait for Enter <span class="qhelp" tabindex="0" data-tip="Run only types the command into the terminal. Review it, then press Enter yourself to execute.">?</span></label>
+      <div class="varboxes">
+        <label>Local variables <small class="muted">— this script only</small>
+          <textarea name="localVars" class="mono" rows="4" spellcheck="false" placeholder="name=value&#10;port=8080"></textarea></label>
+        <label>Global variables <small class="muted">— shared by all scripts</small>
+          <textarea name="globalVars" class="mono" rows="4" spellcheck="false" placeholder="name=value&#10;env=prod"></textarea></label>
+      </div>
+      <p id="scriptVarHint" class="hint"></p>
       <menu><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary">Save</button></menu>
     </form>
   </dialog>
@@ -441,8 +503,8 @@
           <button type="button" id="logOpen" title="Open the log folder">Open</button>
         </span>
       </label>
-      <button type="button" id="logConsole">Open Debug Console</button>
-      <p class="hint">Connections, errors and update checks. Passwords and keys are never logged. Live view: Help → Debug Console (Ctrl/⌘ + Shift + L).</p>
+      <button type="button" id="logConsole">Open Log Console</button>
+      <p class="hint">Connections, errors and update checks. Passwords and keys are never logged. Live view and the Action Log (audit trail): Help → Log Console (Ctrl/⌘ + Shift + L).</p>
       </section>
       <section class="spane" data-pane="ai" hidden>
       <label>Provider <select name="aiProvider"></select></label>
@@ -457,7 +519,7 @@
         </span>
       </label>
       <datalist id="aiModelList"></datalist>
-      <p class="hint">Used by Ask AI in Terminal and Logs. Each provider keeps its own key, encrypted with your macOS Keychain. Logs and terminal text are sent to the selected provider only when you click Ask AI.</p>
+      <p class="hint">Used by Ask AI in Terminal, Logs and the script editor. Each provider keeps its own key, encrypted with your macOS Keychain. Logs and terminal text are sent to the selected provider only when you click Ask AI.</p>
       </section>
       <section class="spane" data-pane="notify" hidden>
       <label class="row"><input name="notify" type="checkbox"> Show desktop notifications</label>

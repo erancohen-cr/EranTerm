@@ -65,9 +65,9 @@ function createWindow() {
   win.loadFile('index.html');
 }
 
-// ---------- app log: Debug Console + optional log file ----------
+// ---------- app log: Log Console + optional log file ----------
 // Everything main prints (console.*, IPC handler errors, Node warnings) goes to an in-memory ring buffer
-// shown in Help → Debug Console. With Settings → "Save log to a file" on (default off) it is also appended
+// shown in Help → Log Console. With Settings → "Save log to a file" on (default off) it is also appended
 // to <folder>/eranterm.log. ponytail: one file, rotated once to eranterm.log.1 at 10 MB on startup/enable.
 const LOG_MAX = 3000;
 const logBuf = [];
@@ -91,13 +91,97 @@ for (const level of ['log', 'info', 'warn', 'error']) {
   const orig = console[level].bind(console);
   console[level] = (...a) => { orig(...a); logLine(level === 'log' ? 'info' : level, a); };
 }
+// Debug level: off by default (Log Console → Debug); not saved, so it is off again after a restart.
+let debugOn = false;
+console.debug = (...a) => { if (debugOn) logLine('debug', a); };
 process.on('warning', w => logLine('warn', [w.message]));
+
+// ---------- Action Log (audit) ----------
+// Every change the user makes (servers, users, groups, scripts, deployments, settings) and every remote action
+// (connect, file changes, kill, maintenance, deploy runs) is appended to actions.jsonl in the data folder.
+// Never contains passwords, keys or file contents. ponytail: one file, rotated once to actions.jsonl.1 at 5 MB.
+const ACT_MAX = 5000;
+const actBuf = [];
+const actFile = () => dataFile('actions.jsonl');
+function audit(rec) {
+  const a = { at: new Date().toISOString(), ...rec };
+  actBuf.push(a);
+  if (actBuf.length > ACT_MAX) actBuf.shift();
+  logLine('info', [`ACTION ${a.action} ${a.target || ''}${a.detail ? ' · ' + a.detail : ''}${a.ok === false ? ' · FAILED: ' + a.error : ''}`]);
+  if (logWin && !logWin.isDestroyed()) logWin.webContents.send('log:action', a);
+  fs.appendFile(actFile(), JSON.stringify(a) + '\n', () => {}); // a failed write must never break the app
+}
+function loadActions() {
+  try {
+    const f = actFile();
+    if (fs.statSync(f).size > 5 * 1024 * 1024) fs.renameSync(f, f + '.1');
+    for (const l of fs.readFileSync(f, 'utf8').split('\n').slice(-ACT_MAX)) if (l) try { actBuf.push(JSON.parse(l)); } catch { /* skip a broken line */ }
+  } catch { /* no file yet */ }
+}
+const srvName = id => (id === 'local' ? 'localhost' : servers().find(x => x.id === id)?.name || id);
+const connName = id => (id === 'local' ? 'localhost' : srvName(conns.get(id)?.serverId) || id);
+const verb = (list, id) => (list.some(x => x.id === id) ? 'modify' : 'create');
+const onOff = v => (v ? 'on' : 'off');
+// channel -> (args) => { action, target, detail } — runs BEFORE the handler (so deleted names are still known).
+const AUDIT = {
+  'servers:save': s => ({ action: `server.${verb(servers(), s.id)}`, target: s.name, detail: `${s.username || ''}@${s.host}${s.group ? ' · group ' + s.group : ''}` }),
+  'servers:delete': id => ({ action: 'server.delete', target: srvName(id) }),
+  'servers:setAlerts': id => ({ action: 'server.alerts', target: srvName(id) }),
+  'users:save': u => ({ action: `user.${verb(users(), u.id)}`, target: u.label || u.username, detail: u.clearPassword ? 'password removed' : u.password ? 'password set' : '' }),
+  'users:delete': id => ({ action: 'user.delete', target: users().find(x => x.id === id)?.label || id }),
+  'groups:save': (old, name, color) => ({ action: old ? 'group.modify' : 'group.create', target: name, detail: [old && old !== name ? `renamed from ${old}` : '', color ? `color ${color}` : ''].filter(Boolean).join(' · ') }),
+  'groups:delete': name => ({ action: 'group.delete', target: name }),
+  'scripts:save': sc => ({ action: `script.${verb(userScripts(), sc.id)}`, target: sc.name }),
+  'scripts:delete': id => ({ action: 'script.delete', target: userScripts().find(x => x.id === id)?.name || id }),
+  'scripts:setGlobals': v => ({ action: 'script.globals', detail: `${Object.keys(v || {}).length} global variables` }),
+  'scripts:restoreBuiltins': () => ({ action: 'script.restoreBuiltins' }),
+  'servers:import': () => ({ action: 'server.import' }),
+  'servers:export': () => ({ action: 'server.export' }),
+  'scripts:import': () => ({ action: 'script.import' }),
+  'scripts:export': () => ({ action: 'script.export' }),
+  'deploy:save': d => ({ action: `deployment.${verb(deployments(), d.id)}`, target: d.name }),
+  'deploy:delete': id => ({ action: 'deployment.delete', target: deployments().find(x => x.id === id)?.name || id }),
+  'deploy:run': d => ({ action: 'deployment.run', target: d.name, detail: `on ${(d.targets || []).map(srvName).join(', ')}` }),
+  'settings:setAutoUpdate': on => ({ action: 'settings.autoUpdate', detail: onOff(on) }),
+  'settings:setLog': a => ({ action: 'settings.logFile', detail: a.logToFile ? `on · ${a.logDir}` : 'off' }),
+  'settings:setAi': a => ({ action: 'settings.ai', detail: `${a.provider}${a.model ? ' · ' + a.model : ''}${a.key ? ' · new key' : ''}` }),
+  'settings:setAvail': a => ({ action: 'settings.availability', detail: `${onOff(a.on)} · every ${a.intervalSec}s` }),
+  'ssh:connect': id => ({ action: 'connect', target: srvName(id) }),
+  'rdp:open': id => ({ action: 'desktop.open', target: srvName(id), detail: 'RDP' }),
+  'remote:open': id => ({ action: 'desktop.open', target: srvName(id) }),
+  'sftp:mkdir': (c, dir) => ({ action: 'file.mkdir', target: connName(c), detail: dir }),
+  'sftp:delete': (c, t) => ({ action: 'file.delete', target: connName(c), detail: typeof t === 'string' ? t : JSON.stringify(t) }),
+  'sftp:upload': (c, dir, locals) => ({ action: 'file.upload', target: connName(c), detail: `${(locals || []).length} item(s) → ${dir}` }),
+  'sftp:download': (c, remote) => ({ action: 'file.download', target: connName(c), detail: remote }),
+  'ssh:kill': (c, pid, force) => ({ action: 'process.kill', target: connName(c), detail: `PID ${pid}${force ? ' (force)' : ''}` }),
+  'maint:dropCaches': c => ({ action: 'maintenance.dropCaches', target: connName(c) }),
+  'maint:cleanDisk': (c, ids) => ({ action: 'maintenance.cleanDisk', target: connName(c), detail: (ids || []).join(', ') }),
+};
+// Wrap every IPC handler: audited channels are recorded (with failures); with Debug on, every call is logged.
+const QUIET = new Set(['log:all', 'actions:all']);
+const handle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (ch, fn) => handle(ch, async (e, ...args) => {
+  if (!QUIET.has(ch)) console.debug(`IPC ${ch}`);
+  let rec = null;
+  try { rec = AUDIT[ch]?.(...args); } catch { rec = { action: ch }; }
+  try {
+    const r = await fn(e, ...args);
+    if (rec && !(ch.endsWith(':import') && !r)) audit(rec); // import cancelled: nothing happened
+    return r;
+  } catch (err) {
+    if (rec) audit({ ...rec, ok: false, error: String(err.message || err).replace(/^NO_API_KEY:\s*/, '').slice(0, 300) });
+    else console.debug(`IPC ${ch} failed: ${err.message || err}`);
+    throw err;
+  }
+});
+ipcMain.handle('actions:all', () => actBuf);
+ipcMain.handle('log:debug', (_e, on) => { if (on !== undefined) { debugOn = !!on; console.info(`Debug logging ${onOff(debugOn)}`); } return debugOn; });
 ipcMain.handle('log:all', () => logBuf);
 ipcMain.on('log:clear', () => { logBuf.length = 0; });
 ipcMain.on('log:openConsole', () => openDebugConsole());
 function openDebugConsole() {
   if (logWin && !logWin.isDestroyed()) return logWin.focus();
-  logWin = new BrowserWindow({ width: 1000, height: 600, title: 'EranTerm Debug Console', backgroundColor: '#0b0d10',
+  logWin = new BrowserWindow({ width: 1100, height: 650, title: 'EranTerm Log Console', backgroundColor: '#0b0d10',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
   logWin.setMenuBarVisibility(false);
   logWin.loadFile('debug.html');
@@ -105,12 +189,17 @@ function openDebugConsole() {
 
 // ---------- menu / help ----------
 let manualWin;
-function openManual() {
-  if (manualWin && !manualWin.isDestroyed()) return manualWin.focus();
+function openManual(hash) {
+  hash = typeof hash === 'string' ? hash.replace(/[^\w-]/g, '') : ''; // menu clicks pass a MenuItem
+  if (manualWin && !manualWin.isDestroyed()) {
+    if (hash) manualWin.loadFile('manual.html', { hash });
+    return manualWin.focus();
+  }
   manualWin = new BrowserWindow({ width: 900, height: 800, title: 'EranTerm User Manual', backgroundColor: '#0b0d10' });
   manualWin.setMenuBarVisibility(false);
-  manualWin.loadFile('manual.html');
+  manualWin.loadFile('manual.html', hash ? { hash } : undefined);
 }
+ipcMain.handle('help:manual', (_e, hash) => openManual(hash));
 function showVersion() {
   dialog.showMessageBox(win, {
     message: `EranTerm ${app.getVersion()}`,
@@ -131,7 +220,7 @@ function buildMenu() {
     { role: 'help', submenu: [
       { label: `Version ${app.getVersion()}`, click: showVersion },
       { label: 'User Manual', accelerator: 'F1', click: openManual },
-      { label: 'Debug Console', accelerator: 'CmdOrCtrl+Shift+L', click: openDebugConsole },
+      { label: 'Log Console', accelerator: 'CmdOrCtrl+Shift+L', click: openDebugConsole },
       { type: 'separator' },
       { label: 'Check for Updates…', click: () => checkUpdates(true) },
     ] },
@@ -252,6 +341,41 @@ ipcMain.handle('servers:save', (_e, s) => {
   writeJson('servers.json', prev ? list.map(x => (x.id === rec.id ? rec : x)) : [...list, rec]);
   if (!prev || prev.host !== rec.host || prev.port !== rec.port || prev.sshPort !== rec.sshPort || !!prev.noProbe !== rec.noProbe) scheduleAvail();
   return publicServer(rec);
+});
+
+// Export/import carry no passwords or saved users (secrets stay on this machine); import skips name+host duplicates.
+ipcMain.handle('servers:export', async () => {
+  const list = servers();
+  if (!list.length) throw new Error('No servers to export.');
+  const { canceled, filePath } = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath('downloads'), 'eranterm-servers.json') });
+  if (canceled) return null;
+  fs.writeFileSync(filePath, JSON.stringify(list.map(({ id, passwordEnc, userId, lastSeen, ...x }) => x), null, 2));
+  return filePath;
+});
+ipcMain.handle('servers:import', async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Servers', extensions: ['json'] }] });
+  if (r.canceled) return 0;
+  const data = JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'));
+  const arr = Array.isArray(data) ? data : data.servers;
+  if (!Array.isArray(arr)) throw new Error('Expected a list of servers.');
+  const list = servers();
+  const have = new Set(list.map(x => `${x.name}|${x.host}`));
+  const added = [];
+  for (const s of arr) {
+    if (!s || !s.host || have.has(`${s.name || s.host}|${s.host}`)) continue;
+    const type = s.type === 'rdp' ? 'rdp' : 'ssh';
+    added.push({
+      id: crypto.randomUUID(), type, name: String(s.name || s.host), host: String(s.host),
+      port: Number(s.port) || (type === 'rdp' ? 3389 : 22), username: String(s.username || ''), domain: String(s.domain || ''),
+      keyPath: String(s.keyPath || ''), sshPort: type === 'rdp' ? Number(s.sshPort) || 22 : undefined,
+      tags: Array.isArray(s.tags) ? s.tags.map(String) : [], starred: !!s.starred,
+      details: String(s.details || '').slice(0, 5000), group: String(s.group || '').slice(0, 100),
+      userId: '', passwordEnc: '', os: type === 'rdp' ? 'windows' : '', noProbe: !!s.noProbe,
+      logPaths: Array.isArray(s.logPaths) ? s.logPaths.map(String) : undefined,
+    });
+  }
+  if (added.length) { writeJson('servers.json', [...list, ...added]); scheduleAvail(); }
+  return added.length;
 });
 
 ipcMain.handle('servers:setLogPaths', (_e, id, paths) => patchServer(id, { logPaths: paths.map(String) }));
@@ -693,6 +817,9 @@ const BUILTIN_SCRIPTS = [
 
 const cleanTags = t => [...new Set((Array.isArray(t) ? t : String(t || '').split(','))
   .map(x => String(x).trim().toLowerCase()).filter(Boolean))].slice(0, 20);
+// { name: value } with names usable as {{name}} in a script.
+const cleanVars = v => Object.fromEntries(Object.entries(v && typeof v === 'object' ? v : {})
+  .filter(([k]) => /^[A-Za-z_]\w*$/.test(k)).slice(0, 200).map(([k, x]) => [k, String(x ?? '').slice(0, 2000)]));
 const cleanScript = sc => ({
   id: sc.id ? String(sc.id) : crypto.randomUUID(),
   name: String(sc.name || 'Untitled').slice(0, 200),
@@ -701,6 +828,7 @@ const cleanScript = sc => ({
   tags: cleanTags(sc.tags),
   root: !!sc.root,
   confirm: !!sc.confirm,
+  vars: cleanVars(sc.vars),
 });
 const userScripts = () => {
   const st = readJson('settings.json', {});
@@ -712,6 +840,9 @@ const userScripts = () => {
 };
 
 ipcMain.handle('scripts:list', () => userScripts());
+// Global variables: one list shared by every script (a script's own variable of the same name wins).
+ipcMain.handle('scripts:globals', () => readJson('scriptvars.json', {}));
+ipcMain.handle('scripts:setGlobals', (_e, v) => writeJson('scriptvars.json', cleanVars(v)));
 ipcMain.handle('scripts:save', (_e, sc) => {
   if (!String(sc.command || '').trim()) throw new Error('Script is empty');
   const rec = cleanScript(sc);
@@ -1179,8 +1310,36 @@ ipcMain.handle('ai:suggest', async (_e, connId, request) => {
   return { command: json.command, explanation: String(json.explanation || ''), risk: String(json.risk || 'unknown') };
 });
 
+// Script form → Ask AI: plan a new script or change the current one. Variable values are never sent (names only).
+const SCRIPT_SYSTEM = `You help write scripts for EranTerm, an SSH terminal app. A script is typed into a remote shell (usually Linux bash/sh).
+Multi-line scripts run with sh (or the interpreter in a #! line). Variables are written {{name}} and filled in before running;
+local variables belong to this script, global ones are shared by all scripts (reuse a global name when one fits).
+Reply with ONLY a JSON object:
+{"name": string, "description": string, "tags": [string], "command": string, "localVars": {name: default value},
+ "root": boolean, "explanation": string, "risk": "low"|"medium"|"high"}.
+"command" is the full script. Put values the user will want to change (paths, hosts, ports) in {{variables}} with defaults in localVars,
+unless a listed global variable fits. "root" is true only if it needs sudo. "explanation" is a short plan: what it does step by step and what to check.
+"risk" is high if it deletes data, changes users/permissions/firewall, restarts services or reboots. Prefer safe, idempotent steps and set -e for multi-step scripts.`;
+ipcMain.handle('ai:script', async (_e, { request, script = {}, globals = [] }) => {
+  const cur = String(script.command || '').slice(0, 20000);
+  const text = await callAI(SCRIPT_SYSTEM,
+    `Request: ${String(request || '').slice(0, 2000) || 'Review and improve this script.'}\n` +
+    `Current name: ${String(script.name || '').slice(0, 200)}\nCurrent description: ${String(script.description || '').slice(0, 500)}\n` +
+    `Local variable names: ${Object.keys(script.vars || {}).join(', ') || 'none'}\nGlobal variable names: ${globals.join(', ') || 'none'}\n` +
+    `Current script:\n${cur || '(empty)'}`, 4096);
+  const json = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+  if (typeof json.command !== 'string' || !json.command.trim()) throw new Error('The AI returned no script. Try rephrasing.');
+  const str = v => (typeof v === 'string' ? v : '');
+  return {
+    name: str(json.name), description: str(json.description), command: json.command, explanation: str(json.explanation),
+    tags: Array.isArray(json.tags) ? json.tags.filter(t => typeof t === 'string') : [], root: json.root === true, risk: str(json.risk) || 'unknown',
+    localVars: Object.fromEntries(Object.entries(json.localVars && typeof json.localVars === 'object' ? json.localVars : {}).map(([k, v]) => [k, String(v)])),
+  };
+});
+
 app.whenReady().then(() => {
   const ls = logSettings();
+  loadActions();
   if (ls.logToFile) try { setLogFile(ls.logDir); } catch (e) { console.error(`Log file disabled: ${e.message}`); }
   console.info(`EranTerm ${app.getVersion()} started (${process.platform} ${process.arch}, Electron ${process.versions.electron})`);
   buildMenu();

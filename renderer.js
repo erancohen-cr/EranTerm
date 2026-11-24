@@ -1,4 +1,4 @@
-/* global api, Terminal, FitAddon, shq, logLevel, parseLogTime, logRowVisible, fileKind */
+/* global api, Terminal, FitAddon, shq, logLevel, parseLogTime, logRowVisible, fileKind, parseVars, varsText, fillVars, scriptKeys */
 
 // Outline file-manager icons (stroke only, 1em, colored via CSS by kind).
 const FILE_ICONS = {
@@ -204,16 +204,23 @@ function renderNav() {
   $('#navFav').classList.toggle('active', homeMode === 'fav');
   $('#navUsers').classList.toggle('active', homeMode === 'users');
   $('#navDeploy').classList.toggle('active', homeMode === 'deploy');
+  $('#navScripts').classList.toggle('active', homeMode === 'scripts');
+  $('#navBcast').classList.toggle('active', homeMode === 'bcast');
   $('#navGroups').replaceChildren(...groupNames().map(name => tintGroup(el('button', {
     className: 'navitem' + (g === name ? ' active' : ''), title: name, onclick: () => setMode(g === name ? 'all' : 'group:' + name), // click again = back to All Servers
   }, el('i', { textContent: name === UNGROUPED ? '◌' : '▣' }), el('span', { className: 'lbl', textContent: name }),
   el('span', { className: 'count lbl', textContent: servers.filter(s => groupOf(s) === name).length }),
   ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name), 'icon gedit lbl')])), name === UNGROUPED ? '' : name)));
-  $('#serversView').hidden = homeMode === 'users' || homeMode === 'deploy';
+  $('#serversView').hidden = ['users', 'deploy', 'scripts', 'bcast'].includes(homeMode);
   $('#usersView').hidden = homeMode !== 'users';
   $('#deployView').hidden = homeMode !== 'deploy';
+  $('#scriptsView').hidden = homeMode !== 'scripts';
+  $('#bcastView').hidden = homeMode !== 'bcast';
   $('#home .content').classList.toggle('flush', homeMode === 'deploy');
+  $('#home .content').classList.toggle('fill', homeMode === 'scripts' || homeMode === 'bcast');
   if (homeMode === 'deploy') deploys ||= initDeployments($('#deployView .panel'));
+  if (homeMode === 'scripts') homeScripts().load();
+  if (homeMode === 'bcast') bcastOptions();
   // suggestions for the server form
   $('#groupList').replaceChildren(...groupNames().filter(x => x !== UNGROUPED).map(value => el('option', { value })));
   $('#usernameList').replaceChildren(...users.map(u => el('option', { value: u.username, label: u.label })));
@@ -531,6 +538,8 @@ $('#navAll').onclick = () => setMode('all');
 $('#navFav').onclick = () => setMode('fav');
 $('#navUsers').onclick = () => setMode('users');
 $('#navDeploy').onclick = () => setMode('deploy');
+$('#navScripts').onclick = () => setMode('scripts');
+$('#navBcast').onclick = () => setMode('bcast');
 
 // ---- users (saved credentials) ----
 function renderUsers() {
@@ -757,6 +766,7 @@ const shellsById = new Map(); // shellId -> terminal wrapper
 api.ssh.onData((id, d) => shellsById.get(id)?.term.write(d));
 api.ssh.onClosed(id => {
   shellsById.get(id)?.term.writeln('\r\n\x1b[90m[session closed]\x1b[0m');
+  for (const p of bcast.panes) if (p.t?.id === id && !p.failed) p.fail('session closed');
   shellsById.delete(id);
 });
 
@@ -785,7 +795,8 @@ function pushHist(serverId, cmd) {
   try { localStorage.setItem('hist:' + serverId, JSON.stringify(h)); } catch { /* ignore */ }
 }
 
-function makeTerm(host, connId, cwd, serverId) {
+// opts.input(data): where typed keys go (Broadcast sends them to many shells); default: this shell.
+function makeTerm(host, connId, cwd, serverId, opts = {}) {
   const term = new Terminal({
     cursorBlink: true, fontSize: 13, fontFamily: 'Menlo, monospace',
     theme: termTheme(),
@@ -795,6 +806,7 @@ function makeTerm(host, connId, cwd, serverId) {
   term.loadAddon(fit);
   term.open(host);
   const t = { term, id: null };
+  const send = d => (opts.input ? opts.input(d) : api.ssh.write(t.id, d));
   const refit = () => { if (host.offsetParent) fit.fit(); };
   const ro = new ResizeObserver(refit); // handles window resize and hidden->shown
   ro.observe(host);
@@ -844,7 +856,7 @@ function makeTerm(host, connId, cwd, serverId) {
   }
   function accept() {
     const rest = sug.items[sug.idx]?.slice(sug.line.length);
-    if (rest && t.id) { api.ssh.write(t.id, rest); sug.line += rest; }
+    if (rest && t.id) { send(rest); sug.line += rest; }
     hide();
   }
   function track(d) {
@@ -883,11 +895,12 @@ function makeTerm(host, connId, cwd, serverId) {
   t.ready = api.ssh.shell(connId, term.cols, term.rows, cwd).then(id => {
     t.id = id;
     shellsById.set(id, t);
-    term.onData(d => { track(d); api.ssh.write(id, d); }); // track first: Enter must see the line before the echo
+    term.onData(d => { track(d); send(d); }); // track first: Enter must see the line before the echo
     term.onResize(({ cols, rows }) => api.ssh.resize(id, cols, rows));
     api.ssh.resize(id, term.cols, term.rows); // size may have changed while the shell was opening
   }, e => term.writeln(`\x1b[31m${cleanErr(e)}\x1b[0m`));
   t.run = async cmd => { await t.ready; if (t.id) api.ssh.write(t.id, cmd); };
+  t.refit = refit;
   t.dispose = () => {
     ro.disconnect();
     if (t.id) { api.ssh.closeShell(t.id); shellsById.delete(t.id); }
@@ -896,6 +909,412 @@ function makeTerm(host, connId, cwd, serverId) {
   };
   return t;
 }
+
+// ================= scripts panel (server Terminal, home Scripts module, Broadcast) =================
+// box: a clone of #scriptsTpl. run(keys): types a script into a terminal; without it there is no Run button.
+let globalVars = {}; // shared by all scripts; a script's own (local) variable of the same name wins
+function makeScriptsPanel(box, { run, runTitle = 'Run' } = {}) {
+  const q = sel => box.querySelector(sel);
+  let scripts = [], dragId = null;
+  const activeTags = new Set();
+  const pref = (k, d) => { try { return localStorage.getItem(k) || d; } catch { return d; } };
+  const setPref = (k, v) => { try { localStorage.setItem(k, v); } catch { /* not remembered */ } };
+  let sortMode = pref('scriptSort', 'manual');
+  q('.sc-sort').value = sortMode;
+  q('.sc-tagmode').value = pref('scriptTagMode', 'or');
+  q('.sc-hidebuiltin').checked = pref('scriptHideBuiltin', '') === '1';
+  q('.sc-hidebuiltin').onchange = () => { setPref('scriptHideBuiltin', q('.sc-hidebuiltin').checked ? '1' : ''); render(); };
+  q('.sc-tagmode').onchange = () => { setPref('scriptTagMode', q('.sc-tagmode').value); render(); };
+  // built-ins carry the 'built-in' tag; removing that tag makes one count as the user's
+  const shown = () => (q('.sc-hidebuiltin').checked ? scripts.filter(x => !(x.tags || []).includes('built-in')) : scripts);
+  const lastRun = () => { try { return JSON.parse(localStorage.getItem('scriptLastRun')) || {}; } catch { return {}; } };
+  const tagMatch = x => !activeTags.size || [...activeTags][q('.sc-tagmode').value === 'and' ? 'every' : 'some'](t => (x.tags || []).includes(t));
+
+  async function load() {
+    try { [scripts, globalVars] = await Promise.all([api.scripts.list(), api.scripts.globals()]); } catch (e) { toast(cleanErr(e), true); }
+    render();
+  }
+  const toggleTag = t => { activeTags[activeTags.has(t) ? 'delete' : 'add'](t); render(); };
+
+  function renderTags() {
+    const counts = new Map();
+    for (const x of shown()) for (const t of x.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
+    for (const t of activeTags) if (!counts.has(t)) activeTags.delete(t);
+    q('.sc-tagmode').hidden = activeTags.size < 2; // AND/OR only matters with two or more tags picked
+    q('.sc-tags').replaceChildren(
+      ...[...counts.keys()].sort().map(t => el('button', {
+        className: 'tchip' + (activeTags.has(t) ? ' on' : ''), title: `Show scripts tagged "${t}"`, onclick: () => toggleTag(t),
+      }, t, el('small', { textContent: counts.get(t) }))),
+      ...(activeTags.size ? [el('button', { className: 'tchip clear', textContent: '✕ Clear', onclick: () => { activeTags.clear(); render(); } })] : []));
+  }
+
+  function render() {
+    renderTags();
+    const f = q('.sc-filter').value.toLowerCase();
+    let list = shown()
+      .filter(x => !f || `${x.name} ${x.description} ${x.command} ${(x.tags || []).join(' ')}`.toLowerCase().includes(f))
+      .filter(tagMatch);
+    if (sortMode === 'name') list = [...list].sort((a, b) => a.name.localeCompare(b.name));
+    if (sortMode === 'recent') { const lr = lastRun(); list = [...list].sort((a, b) => (lr[b.id] || 0) - (lr[a.id] || 0)); }
+    const canDrag = sortMode === 'manual' && !f && !activeTags.size;
+    q('.sc-hint').textContent = sortMode !== 'manual' ? '' : canDrag ? 'Drag ⋮⋮ to change the order.' : 'Clear the search and tag filters to drag scripts into a new order.';
+    q('.sc-list').replaceChildren(...list.map(x => {
+      const nVars = Object.keys(x.vars || {}).length;
+      const isBuiltin = (x.tags || []).includes('built-in');
+      const li = el('li', { title: x.command, draggable: canDrag, className: isBuiltin ? 'builtin' : '' },
+        el('div', { className: 'sc-head' },
+          canDrag ? el('span', { className: 'grip', textContent: '⋮⋮', title: 'Drag to reorder' }) : null,
+          isBuiltin ? el('span', { className: 'bi-badge', textContent: '🧰', title: 'Built-in script' }) : null,
+          el('b', { textContent: x.name }),
+          x.root ? el('span', { textContent: '🔒', title: 'Runs as root (sudo)' }) : null,
+          x.confirm ? el('span', { textContent: '⏎', title: 'Waits for Enter before executing' }) : null,
+          nVars ? el('span', { className: 'muted', textContent: `{{${nVars}}}`, title: `Local variables: ${Object.keys(x.vars).join(', ')}` }) : null,
+          el('span', { className: 'grow' }),
+          iconBtn('✎', 'Edit', () => editScript(x)),
+          iconBtn('🗑', 'Delete', () => deleteScript(x), 'icon danger'),
+          run ? iconBtn('▶ Run', runTitle, () => runScript(x), 'primary sm') : null),
+        x.description ? el('small', { textContent: x.description }) : null,
+        el('code', { className: 'mono', textContent: x.command.split('\n')[0] + (x.command.includes('\n') ? ' …' : '') }),
+        x.tags?.length ? el('div', { className: 'sc-tagrow' }, ...x.tags.map(t => el('span', {
+          className: 'tag' + (activeTags.has(t) ? ' on' : ''), textContent: t, title: `Filter by "${t}"`,
+          onclick: e => { e.stopPropagation(); toggleTag(t); },
+        }))) : null);
+      if (canDrag) {
+        li.ondragstart = e => { dragId = x.id; li.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; };
+        li.ondragend = () => { dragId = null; li.classList.remove('dragging'); };
+        li.ondragover = e => {
+          if (!dragId) return;
+          e.preventDefault();
+          const r = li.getBoundingClientRect();
+          const after = e.clientY > r.top + r.height / 2;
+          li.classList.toggle('drop-after', after);
+          li.classList.toggle('drop-before', !after);
+        };
+        li.ondragleave = () => li.classList.remove('drop-after', 'drop-before');
+        li.ondrop = async e => {
+          e.preventDefault();
+          const after = li.classList.contains('drop-after');
+          li.classList.remove('drop-after', 'drop-before');
+          if (!dragId || dragId === x.id) return;
+          const ids = scripts.map(y => y.id).filter(id => id !== dragId);
+          ids.splice(ids.indexOf(x.id) + (after ? 1 : 0), 0, dragId);
+          scripts = ids.map(id => scripts.find(y => y.id === id));
+          render();
+          try { await api.scripts.reorder(ids); } catch (err) { toast(cleanErr(err), true); load(); }
+        };
+      }
+      return li;
+    }));
+  }
+  q('.sc-sort').onchange = () => { sortMode = q('.sc-sort').value; setPref('scriptSort', sortMode); render(); };
+  q('.sc-restore').onclick = async () => {
+    const n = await api.scripts.restoreBuiltins();
+    toast(n ? `Restored ${n} built-in script${n === 1 ? '' : 's'}` : 'All built-in scripts are already in your list.');
+    load();
+  };
+  function runScript(x) {
+    try { localStorage.setItem('scriptLastRun', JSON.stringify({ ...lastRun(), [x.id]: Date.now() })); } catch { /* ignore */ }
+    const { text, missing } = fillVars(x.command, x.vars || {}, globalVars);
+    if (missing.length) toast(`Not defined, left as is: ${missing.map(k => `{{${k}}}`).join(' ')}`, true);
+    run(scriptKeys(text, x));
+  }
+  function editScript(x = {}) {
+    const f = $('#scriptForm');
+    f.reset();
+    for (const k of ['id', 'name', 'description', 'command']) f.elements[k].value = x[k] || '';
+    f.elements.root.checked = !!x.root;
+    f.elements.confirm.checked = !!x.confirm;
+    f.elements.tags.value = (x.tags || []).join(', ');
+    f.elements.localVars.value = varsText(x.vars);
+    f.elements.globalVars.value = varsText(globalVars);
+    const globalsBefore = f.elements.globalVars.value;
+    // which {{names}} the command uses and whether each one has a value
+    const varHint = () => {
+      const { missing } = fillVars(f.elements.command.value, parseVars(f.elements.localVars.value), parseVars(f.elements.globalVars.value));
+      const used = [...new Set([...f.elements.command.value.matchAll(/\{\{\s*([A-Za-z_]\w*)\s*\}\}/g)].map(m => m[1]))];
+      $('#scriptVarHint').textContent = !used.length ? 'Use {{name}} in the script to insert a variable.'
+        : `Uses: ${used.join(', ')}` + (missing.length ? ` · not defined: ${missing.join(', ')}` : ' · all defined ✓');
+      $('#scriptVarHint').className = 'hint' + (missing.length ? ' warn' : '');
+    };
+    f.elements.command.oninput = f.elements.localVars.oninput = f.elements.globalVars.oninput = varHint;
+    varHint();
+    // Ask AI: shows a proposal; "Apply to form" fills the script (name/description/tags only when empty).
+    const out = $('#scriptAiOut');
+    out.hidden = true;
+    $('#scriptAiQ').value = '';
+    const ask = async () => {
+      const btn = $('#scriptAiBtn');
+      btn.disabled = true;
+      btn.textContent = '✦ Thinking…';
+      try {
+        const e = f.elements;
+        const r = await api.ai.script({ request: $('#scriptAiQ').value.trim(),
+          script: { name: e.name.value, description: e.description.value, command: e.command.value, vars: parseVars(e.localVars.value) },
+          globals: Object.keys(parseVars(e.globalVars.value)) });
+        const apply = () => {
+          e.command.value = r.command;
+          e.localVars.value = varsText({ ...parseVars(e.localVars.value), ...r.localVars });
+          if (!e.name.value.trim()) e.name.value = r.name;
+          if (!e.description.value.trim()) e.description.value = r.description;
+          if (!e.tags.value.trim()) e.tags.value = r.tags.join(', ');
+          e.root.checked = r.root;
+          varHint();
+          out.hidden = true;
+          toast('Applied — review it before saving');
+        };
+        out.replaceChildren(
+          el('div', { className: 'aiOutHead' }, el('b', { textContent: '✦ AI proposal' }), el('span', { className: 'aiRisk risk-' + r.risk, textContent: `risk: ${r.risk}` }),
+            el('span', { className: 'grow' }), el('button', { type: 'button', className: 'sm primary', textContent: 'Apply to form', onclick: apply }),
+            iconBtn('×', 'Close', () => { out.hidden = true; })),
+          el('div', { className: 'aiOutBody' }, // plain text: model output is never rendered as HTML
+            el('div', { textContent: r.explanation }),
+            el('pre', { className: 'mono', textContent: r.command }),
+            Object.keys(r.localVars).length ? el('div', { className: 'muted', textContent: 'Local variables: ' + varsText(r.localVars).replace(/\n/g, ' · ') }) : ''));
+      } catch (err) {
+        out.replaceChildren(el('div', { className: 'aiOutBody aiError' }));
+        showAiError(out.firstChild, err);
+      }
+      out.hidden = false;
+      btn.disabled = false;
+      btn.textContent = '✦ Ask AI';
+    };
+    $('#scriptAiBtn').onclick = ask;
+    // Enter would submit the form (closing the dialog): ask instead.
+    $('#scriptAiQ').onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); ask(); } };
+    // existing tags as one-click chips
+    const all = [...new Set(scripts.flatMap(y => y.tags || []))].sort();
+    $('#scriptTagPick').replaceChildren(...all.map(t => el('button', {
+      type: 'button', className: 'tchip', textContent: t,
+      onclick: () => {
+        const cur = f.elements.tags.value.split(',').map(y => y.trim()).filter(Boolean);
+        if (!cur.includes(t)) f.elements.tags.value = [...cur, t].join(', ');
+      },
+    })));
+    const dlg = $('#scriptDlg');
+    dlg.returnValue = '';
+    dlg.showModal();
+    dlg.addEventListener('close', async () => {
+      if (dlg.returnValue !== 'save') return;
+      const e = f.elements;
+      try {
+        await api.scripts.save({ id: e.id.value || undefined, name: e.name.value, description: e.description.value, command: e.command.value,
+          tags: e.tags.value, root: e.root.checked, confirm: e.confirm.checked, vars: parseVars(e.localVars.value) });
+        if (e.globalVars.value !== globalsBefore) await api.scripts.setGlobals(parseVars(e.globalVars.value));
+        load();
+      } catch (err) { toast(cleanErr(err), true); }
+    }, { once: true });
+  }
+  async function deleteScript(x) {
+    if (!confirm(`Delete script "${x.name}"?`)) return;
+    await api.scripts.delete(x.id);
+    load();
+  }
+  q('.sc-refresh').onclick = load;
+  q('.sc-add').onclick = () => editScript();
+  q('.sc-help').onclick = () => api.help.manual('scripting');
+  q('.sc-filter').oninput = render;
+  q('.sc-up').onclick = async () => {
+    try { const n = await api.scripts.import(); if (n) toast(`Imported ${n} script${n === 1 ? '' : 's'}`); load(); }
+    catch (e) { toast(`Import failed: ${cleanErr(e)}`, true); }
+  };
+  q('.sc-down').onclick = async () => {
+    try { const f = await api.scripts.export(); if (f) toast(`Exported to ${f}`); }
+    catch (e) { toast(cleanErr(e), true); }
+  };
+  return { load };
+}
+
+// ================= home: Scripts module =================
+let homeScriptsPanel;
+function homeScripts() {
+  if (homeScriptsPanel) return homeScriptsPanel;
+  const box = $('#scriptsTpl').content.firstElementChild.cloneNode(true);
+  box.classList.add('full');
+  box.querySelector('.sc-close').hidden = true;
+  $('#scriptsView').append(box);
+  return (homeScriptsPanel = makeScriptsPanel(box)); // managing only: Run lives in terminals
+}
+$('#srvImport').onclick = async () => {
+  try { const n = await api.servers.import(); if (n) { toast(`Imported ${n} server${n === 1 ? '' : 's'}`); await refreshServers(); renderServers(); } }
+  catch (e) { toast(e.message, true); }
+};
+$('#srvExport').onclick = async () => {
+  try { const f = await api.servers.export(); if (f) toast(`Exported to ${f}`); } catch (e) { toast(e.message, true); }
+};
+$('#scriptsManual').onclick = () => api.help.manual('scripting');
+
+// ================= home: Broadcast module =================
+// One terminal per pane (saved servers or localhost); keys typed in a checked pane go to every checked pane.
+const bcast = { panes: [], localNo: 0, scripts: null };
+const bcastTargets = () => bcast.panes.filter(p => p.t?.id && p.chk.checked);
+function bcastSend(from, d) {
+  for (const p of $('#bcastOn').checked && from.chk.checked ? bcastTargets() : [from]) if (p.t?.id) api.ssh.write(p.t.id, d);
+}
+function paintBcast() {
+  const n = bcast.panes.length, on = bcast.panes.filter(p => p.chk.checked).length;
+  $('#bcastBadge').textContent = n ? `${on} of ${n} receiving` : '';
+  $('#bcastGrid').querySelector('.empty').hidden = n > 0;
+  $('#bcastAll').checked = n > 0 && on === n;
+  const bad = bcast.panes.filter(p => p.failed).length;
+  $('#bcastReconn').hidden = !bad;
+  $('#bcastReconn').replaceChildren(el('span', { className: 'reic', textContent: '⟳' }), ` Reconnect all (${bad})`);
+  $('#bcastAll').indeterminate = on > 0 && on < n;
+  for (const p of bcast.panes) p.el.classList.toggle('on', p.chk.checked && $('#bcastOn').checked);
+  bcastSave();
+}
+// Keep after restart: the pane list lives in localStorage; restored panes wait for Reconnect all.
+const bcastKeepOn = () => { try { return localStorage.getItem('bcastKeep') === 'on'; } catch { return false; } };
+function bcastSave() {
+  try {
+    localStorage.setItem('bcastKeep', $('#bcastKeep').checked ? 'on' : 'off');
+    localStorage.setItem('bcastPanes', JSON.stringify($('#bcastKeep').checked
+      ? bcast.panes.map(p => ({ id: p.s.local ? LOCAL : p.s.id, name: p.s.name, on: p.chk.checked })) : []));
+  } catch { /* not remembered */ }
+}
+$('#bcastKeep').checked = bcastKeepOn();
+$('#bcastKeep').onchange = bcastSave;
+function bcastRestore() {
+  if (!bcastKeepOn()) return;
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem('bcastPanes')) || []; } catch { /* nothing to reopen */ }
+  for (const x of list) {
+    const s = x.id === LOCAL ? { ...LOCAL_SERVER, name: x.name } : servers.find(y => y.id === x.id);
+    if (!s) continue;
+    if (s.local) bcast.localNo = Math.max(bcast.localNo, +x.name.split(' ')[1] || 0);
+    bcastAddPane(s, { connect: false, on: x.on });
+  }
+}
+// Minimized view: small panes and tiny text; double-click one to enlarge it (one at a time).
+const bcastFont = p => {
+  if (!p.t) return;
+  p.t.term.options.fontSize = $('#bcastMini').checked && !p.el.classList.contains('big') ? 5 : 13;
+  p.t.refit();
+};
+function bcastMini() {
+  $('#bcastGrid').classList.toggle('mini', $('#bcastMini').checked);
+  for (const p of bcast.panes) { p.el.classList.remove('big'); bcastFont(p); }
+}
+$('#bcastMini').onchange = bcastMini;
+function bcastEnlarge(pane) {
+  if (!$('#bcastMini').checked) return;
+  const on = !pane.el.classList.contains('big');
+  for (const p of bcast.panes) if (p.el.classList.contains('big')) { p.el.classList.remove('big'); bcastFont(p); }
+  pane.el.classList.toggle('big', on);
+  bcastFont(pane);
+  if (on) { pane.el.scrollIntoView({ block: 'nearest' }); pane.t?.term.focus(); }
+}
+$('#bcastOn').onchange = paintBcast;
+// Select all: checked when every terminal receives, dash when only some do.
+$('#bcastAll').onchange = e => { for (const p of bcast.panes) p.chk.checked = e.target.checked; paintBcast(); };
+// Add server: a tree of groups (native <details>), filtered by every field; stays open to add several.
+function bcastOptions() {
+  const f = $('#bcastQ').value.trim().toLowerCase();
+  const hit = s => !f || [s.name, s.host, s.username, s.group, s.details, s.port, ...(s.tags || [])].join(' ').toLowerCase().includes(f);
+  const tree = groupNames().map(g => {
+    const list = servers.filter(s => groupOf(s) === g && hit(s)).sort((a, b) => a.name.localeCompare(b.name));
+    if (!list.length) return null;
+    return el('details', { open: true }, tintGroup(el('summary', {}, el('span', { textContent: g }), el('small', { textContent: list.length })), g === UNGROUPED ? '' : g),
+      ...list.map(s => el('button', { type: 'button', className: 'bcitem', onclick: () => bcastAddPane(s) },
+        el('b', { textContent: s.name }), el('small', { className: 'mono', textContent: `${s.username || ''}@${s.host}` }))));
+  }).filter(Boolean);
+  $('#bcastTree').replaceChildren(...(tree.length ? tree : [el('p', { className: 'muted', textContent: 'No matching servers.' })]));
+}
+$('#bcastQ').oninput = bcastOptions;
+$('#bcastQ').onkeydown = e => { if (e.key === 'Escape') $('#bcastMenu').hidden = true; };
+$('#bcastAddBtn').onclick = () => {
+  $('#bcastMenu').hidden = !$('#bcastMenu').hidden;
+  if ($('#bcastMenu').hidden) return;
+  bcastOptions();
+  $('#bcastQ').focus();
+};
+document.addEventListener('mousedown', e => { if (!e.target.closest('.bcadd')) $('#bcastMenu').hidden = true; });
+$('#bcastLocal').onclick = () => bcastAddPane({ ...LOCAL_SERVER, name: `localhost ${++bcast.localNo}` });
+
+function bcastAddPane(s, { connect = true, on = true } = {}) {
+  const host = el('div', { className: 'xhost' });
+  const chk = el('input', { type: 'checkbox', checked: on });
+  const status = el('small', { className: 'muted' });
+  const reBtn = iconBtn('⟳', 'Reconnect this terminal', () => pane.connect(), 'x re');
+  const pane = { s, chk, connId: null, t: null, failed: false };
+  pane.setStatus = (text, cls = 'muted') => { status.textContent = text; status.className = cls; };
+  // Connection failed or dropped, or the shell ended: counted by "Reconnect failed".
+  pane.fail = (msg, cls = 'failed') => {
+    pane.failed = true;
+    pane.setStatus(msg, cls === 'failed' ? 'error' : 'muted');
+    pane.el.classList.add(cls);
+    paintBcast();
+  };
+  // (Re)connect in place: the pane, its position and its checkbox stay; the terminal starts fresh.
+  pane.connect = async () => {
+    pane.t?.dispose();
+    pane.t = null;
+    if (pane.connId && !s.local) api.ssh.disconnect(pane.connId);
+    pane.connId = null;
+    pane.failed = false;
+    pane.el.classList.remove('failed', 'idle');
+    pane.setStatus('connecting…');
+    paintBcast();
+    let connId;
+    try { connId = await api.ssh.connect(s.id); } catch (e) { return bcast.panes.includes(pane) && pane.fail(`failed: ${cleanErr(e)}`); }
+    if (!bcast.panes.includes(pane)) return s.local || api.ssh.disconnect(connId); // closed while connecting
+    pane.connId = connId;
+    pane.setStatus(s.local ? 'this computer' : `${s.username}@${s.host}`);
+    pane.t = makeTerm(host, connId, undefined, s.local ? LOCAL : s.id, { input: d => bcastSend(pane, d) });
+    bcastFont(pane);
+  };
+  chk.onchange = paintBcast;
+  pane.el = el('section', { className: 'bcpane' },
+    tintGroup(el('header', { title: 'Drag to reorder · double-click (Minimized) to enlarge' }, s.local ? el('span', { className: 'av up', title: 'This computer' }) : avMark(s.id, 'server'),
+      el('label', { className: 'chk', title: 'Receive broadcast keystrokes and scripts' }, chk, el('b', { textContent: s.name })),
+      status, el('span', { className: 'grow' }), reBtn, iconBtn('×', 'Close this terminal', () => bcastClose(pane), 'x')), s.local ? '' : s.group || ''),
+    host);
+  // Draggable only while the title bar is held, so text selection in the terminal still works.
+  pane.el.firstElementChild.onmousedown = () => { pane.el.draggable = true; };
+  pane.el.addEventListener('dragend', () => { pane.el.draggable = false; });
+  pane.el.addEventListener('mouseup', () => { pane.el.draggable = false; });
+  pane.el.addEventListener('dblclick', e => { if (!e.target.closest('button, label')) bcastEnlarge(pane); });
+  $('#bcastGrid').append(pane.el);
+  bcast.panes.push(pane);
+  paintAvail();
+  if (connect) return pane.connect();
+  pane.fail('not connected', 'idle');
+}
+function bcastClose(pane) {
+  bcast.panes.splice(bcast.panes.indexOf(pane), 1);
+  pane.t?.dispose();
+  if (pane.connId && !pane.s.local) api.ssh.disconnect(pane.connId);
+  pane.el.remove();
+  paintBcast();
+}
+// Order: drag title bars, or sort by group (Home's group order, localhost last). Kept with Keep after restart.
+const bcastReorder = () => { bcast.panes.sort((a, b) => [...$('#bcastGrid').children].indexOf(a.el) - [...$('#bcastGrid').children].indexOf(b.el)); paintBcast(); };
+dragReorder($('#bcastGrid'), '.bcpane', bcastReorder);
+$('#bcastSort').onclick = () => {
+  const order = groupNames(), rank = p => (p.s.local ? order.length : order.indexOf(groupOf(p.s)));
+  for (const p of [...bcast.panes].sort((a, b) => rank(a) - rank(b) || a.s.name.localeCompare(b.s.name, undefined, { numeric: true }))) $('#bcastGrid').append(p.el);
+  bcastReorder();
+};
+$('#bcastHelp').onclick = () => api.help.manual('broadcast');
+$('#bcastReconn').onclick = () => { for (const p of bcast.panes) if (p.failed) p.connect(); };
+// Scripts run on every checked terminal (whether or not keystroke broadcast is on).
+$('#bcastScripts').onclick = () => {
+  if (!bcast.scripts) {
+    const box = $('#scriptsTpl').content.firstElementChild.cloneNode(true);
+    $('#bcastView .bcbody').append(box);
+    box.querySelector('.sc-close').onclick = () => { box.hidden = true; $('#bcastScripts').classList.remove('on'); };
+    bcast.scripts = { box, panel: makeScriptsPanel(box, { runTitle: 'Run on every checked terminal', run: keys => {
+      const list = bcastTargets();
+      if (!list.length) return toast('No checked terminal is connected.', true);
+      for (const p of list) api.ssh.write(p.t.id, keys);
+      toast(`Sent to ${list.length} terminal${list.length === 1 ? '' : 's'}`);
+    } }) };
+    bcast.scripts.box.hidden = true;
+  }
+  const { box, panel } = bcast.scripts;
+  box.hidden = !box.hidden;
+  $('#bcastScripts').classList.toggle('on', !box.hidden);
+  if (!box.hidden) panel.load();
+};
 
 // ================= server page =================
 const tailHandlers = new Map(); // tailId -> { data(chunk), end() }
@@ -915,6 +1334,7 @@ api.ssh.onHostKeyReplaced((serverId, k) => {
 
 api.ssh.onConnClosed((connId, msg) => {
   for (const v of views.values()) if (v.connId === connId) v.disconnected(msg);
+  for (const p of bcast.panes) if (p.connId === connId) p.fail(`disconnected${msg ? ': ' + msg : ''}`);
 });
 
 function closeServer(serverId) {
@@ -1050,162 +1470,16 @@ async function openServer(s) {
   });
 
   // ---- scripts side panel ----
-  let scripts = [], dragId = null;
-  const activeTags = new Set(); // show scripts having ANY of these tags
-  let sortMode = 'manual';
-  try { sortMode = localStorage.getItem('scriptSort') || 'manual'; } catch { /* default */ }
-  q('.sc-sort').value = sortMode;
-  try { q('.sc-hidebuiltin').checked = localStorage.getItem('scriptHideBuiltin') === '1'; } catch { /* default */ }
-  q('.sc-hidebuiltin').onchange = () => {
-    try { localStorage.setItem('scriptHideBuiltin', q('.sc-hidebuiltin').checked ? '1' : ''); } catch { /* ignore */ }
-    renderScripts();
-  };
-  // built-ins carry the 'built-in' tag; removing that tag makes one count as the user's
-  const shown = () => (q('.sc-hidebuiltin').checked ? scripts.filter(x => !(x.tags || []).includes('built-in')) : scripts);
-  const lastRun = () => { try { return JSON.parse(localStorage.getItem('scriptLastRun')) || {}; } catch { return {}; } };
-
-  async function loadScripts() {
-    try { scripts = await api.scripts.list(); } catch (e) { toast(cleanErr(e), true); }
-    renderScripts();
-  }
-  const toggleTag = t => { activeTags[activeTags.has(t) ? 'delete' : 'add'](t); renderScripts(); };
-
-  function renderTags() {
-    const counts = new Map();
-    for (const x of shown()) for (const t of x.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
-    for (const t of activeTags) if (!counts.has(t)) activeTags.delete(t);
-    q('.sc-tags').replaceChildren(
-      ...[...counts.keys()].sort().map(t => el('button', {
-        className: 'tchip' + (activeTags.has(t) ? ' on' : ''), title: `Show scripts tagged "${t}"`, onclick: () => toggleTag(t),
-      }, t, el('small', { textContent: counts.get(t) }))),
-      ...(activeTags.size ? [el('button', { className: 'tchip clear', textContent: '✕ Clear', onclick: () => { activeTags.clear(); renderScripts(); } })] : []));
-  }
-
-  function renderScripts() {
-    renderTags();
-    const f = q('.sc-filter').value.toLowerCase();
-    let list = shown()
-      .filter(x => !f || `${x.name} ${x.description} ${x.command} ${(x.tags || []).join(' ')}`.toLowerCase().includes(f))
-      .filter(x => !activeTags.size || (x.tags || []).some(t => activeTags.has(t)));
-    if (sortMode === 'name') list = [...list].sort((a, b) => a.name.localeCompare(b.name));
-    if (sortMode === 'recent') { const lr = lastRun(); list = [...list].sort((a, b) => (lr[b.id] || 0) - (lr[a.id] || 0)); }
-    const canDrag = sortMode === 'manual' && !f && !activeTags.size;
-    q('.sc-hint').textContent = sortMode !== 'manual' ? '' : canDrag ? 'Drag ⋮⋮ to change the order.' : 'Clear the search and tag filters to drag scripts into a new order.';
-    q('.sc-list').replaceChildren(...list.map(x => {
-      const li = el('li', { title: x.command, draggable: canDrag },
-        el('div', { className: 'sc-head' },
-          canDrag ? el('span', { className: 'grip', textContent: '⋮⋮', title: 'Drag to reorder' }) : null,
-          el('b', { textContent: x.name }),
-          x.root ? el('span', { textContent: '🔒', title: 'Runs as root (sudo)' }) : null,
-          x.confirm ? el('span', { textContent: '⏎', title: 'Waits for Enter before executing' }) : null,
-          el('span', { className: 'grow' }),
-          iconBtn('✎', 'Edit', () => editScript(x)),
-          iconBtn('🗑', 'Delete', () => deleteScript(x), 'icon danger'),
-          iconBtn('▶ Run', 'Run in the active terminal session', () => runScript(x), 'primary sm')),
-        x.description ? el('small', { textContent: x.description }) : null,
-        el('code', { className: 'mono', textContent: x.command.split('\n')[0] + (x.command.includes('\n') ? ' …' : '') }),
-        x.tags?.length ? el('div', { className: 'sc-tagrow' }, ...x.tags.map(t => el('span', {
-          className: 'tag' + (activeTags.has(t) ? ' on' : ''), textContent: t, title: `Filter by "${t}"`,
-          onclick: e => { e.stopPropagation(); toggleTag(t); },
-        }))) : null);
-      if (canDrag) {
-        li.ondragstart = e => { dragId = x.id; li.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; };
-        li.ondragend = () => { dragId = null; li.classList.remove('dragging'); };
-        li.ondragover = e => {
-          if (!dragId) return;
-          e.preventDefault();
-          const r = li.getBoundingClientRect();
-          const after = e.clientY > r.top + r.height / 2;
-          li.classList.toggle('drop-after', after);
-          li.classList.toggle('drop-before', !after);
-        };
-        li.ondragleave = () => li.classList.remove('drop-after', 'drop-before');
-        li.ondrop = async e => {
-          e.preventDefault();
-          const after = li.classList.contains('drop-after');
-          li.classList.remove('drop-after', 'drop-before');
-          if (!dragId || dragId === x.id) return;
-          const ids = scripts.map(y => y.id).filter(id => id !== dragId);
-          ids.splice(ids.indexOf(x.id) + (after ? 1 : 0), 0, dragId);
-          scripts = ids.map(id => scripts.find(y => y.id === id));
-          renderScripts();
-          try { await api.scripts.reorder(ids); } catch (err) { toast(cleanErr(err), true); loadScripts(); }
-        };
-      }
-      return li;
-    }));
-  }
-  q('.sc-sort').onchange = () => {
-    sortMode = q('.sc-sort').value;
-    try { localStorage.setItem('scriptSort', sortMode); } catch { /* ignore */ }
-    renderScripts();
-  };
-  q('.sc-restore').onclick = async () => {
-    const n = await api.scripts.restoreBuiltins();
-    toast(n ? `Restored ${n} built-in script${n === 1 ? '' : 's'}` : 'All built-in scripts are already in your list.');
-    loadScripts();
-  };
-  function runScript(x) {
-    try { localStorage.setItem('scriptLastRun', JSON.stringify({ ...lastRun(), [x.id]: Date.now() })); } catch { /* ignore */ }
-    const body = x.command.replace(/\r\n/g, '\n').trimEnd();
-    const end = x.confirm ? '' : '\r'; // confirm: leave the last line unsent so the user's Enter runs it
-    if (!body.includes('\n') && !x.root) return runInTerminal(body + end);
-    // multi-line (or root): feed through a heredoc so blocks/functions run as one script
-    const nl = body.indexOf('\n');
-    const interp = body.startsWith('#!') ? body.slice(2, nl < 0 ? undefined : nl).trim() : 'sh';
-    runInTerminal(`${x.root ? 'sudo ' : ''}${interp} -s <<'ERATERM_SCRIPT'\r${body.replace(/\n/g, '\r')}\rERATERM_SCRIPT${end}`);
-  }
-  function editScript(x = {}) {
-    const f = $('#scriptForm');
-    f.reset();
-    for (const k of ['id', 'name', 'description', 'command']) f.elements[k].value = x[k] || '';
-    f.elements.root.checked = !!x.root;
-    f.elements.confirm.checked = !!x.confirm;
-    f.elements.tags.value = (x.tags || []).join(', ');
-    // existing tags as one-click chips
-    const all = [...new Set(scripts.flatMap(y => y.tags || []))].sort();
-    $('#scriptTagPick').replaceChildren(...all.map(t => el('button', {
-      type: 'button', className: 'tchip', textContent: t,
-      onclick: () => {
-        const cur = f.elements.tags.value.split(',').map(y => y.trim()).filter(Boolean);
-        if (!cur.includes(t)) f.elements.tags.value = [...cur, t].join(', ');
-      },
-    })));
-    const dlg = $('#scriptDlg');
-    dlg.returnValue = '';
-    dlg.showModal();
-    dlg.addEventListener('close', async () => {
-      if (dlg.returnValue !== 'save') return;
-      const e = f.elements;
-      try {
-        await api.scripts.save({ id: e.id.value || undefined, name: e.name.value, description: e.description.value, command: e.command.value, tags: e.tags.value, root: e.root.checked, confirm: e.confirm.checked });
-        loadScripts();
-      } catch (err) { toast(cleanErr(err), true); }
-    }, { once: true });
-  }
-  async function deleteScript(x) {
-    if (!confirm(`Delete script "${x.name}"?`)) return;
-    await api.scripts.delete(x.id);
-    loadScripts();
-  }
+  const scBox = $('#scriptsTpl').content.firstElementChild.cloneNode(true);
+  scBox.hidden = true;
+  q('.panel.term').append(scBox);
+  const scPanel = makeScriptsPanel(scBox, { run: keys => runInTerminal(keys), runTitle: 'Run in the active terminal session' });
   q('.tscripts').onclick = () => {
-    const p = q('.scripts');
-    p.hidden = !p.hidden;
-    q('.tscripts').classList.toggle('on', !p.hidden);
-    if (!p.hidden) loadScripts();
+    scBox.hidden = !scBox.hidden;
+    q('.tscripts').classList.toggle('on', !scBox.hidden);
+    if (!scBox.hidden) scPanel.load();
   };
-  q('.sc-close').onclick = () => { q('.scripts').hidden = true; q('.tscripts').classList.remove('on'); };
-  q('.sc-refresh').onclick = loadScripts;
-  q('.sc-add').onclick = () => editScript();
-  q('.sc-filter').oninput = renderScripts;
-  q('.sc-up').onclick = async () => {
-    try { const n = await api.scripts.import(); if (n) toast(`Imported ${n} script${n === 1 ? '' : 's'}`); loadScripts(); }
-    catch (e) { toast(`Import failed: ${cleanErr(e)}`, true); }
-  };
-  q('.sc-down').onclick = async () => {
-    try { const f = await api.scripts.export(); if (f) toast(`Exported to ${f}`); }
-    catch (e) { toast(cleanErr(e), true); }
-  };
+  scBox.querySelector('.sc-close').onclick = () => { scBox.hidden = true; q('.tscripts').classList.remove('on'); };
 
   // ---- side terminal (inside file manager) ----
   let sideTerm = null;
@@ -1939,6 +2213,7 @@ setInterval(() => {
 }, 5000);
 
 refreshServers().then(() => {
+  bcastRestore();
   if (!restoreTabsOn()) return;
   let ids = [];
   try { ids = JSON.parse(localStorage.getItem('openTabs')) || []; } catch { /* nothing to reopen */ }
