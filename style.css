@@ -801,7 +801,7 @@ dialog#envDlg { width: 480px; }
 #settingsForm > .stabs { grid-column: 1; grid-row: 2 / span 4; flex-direction: column; flex-wrap: nowrap; gap: 2px; margin: 0; border-bottom: 0; border-right: 1px solid var(--line); padding-right: 10px; }
 #settingsForm > .stabs button { text-align: left; border-radius: 6px; padding: 7px 10px; }
 #settingsForm > .stabs button.on { box-shadow: inset 3px 0 var(--accent); }
-#settingsForm > :not(h3):not(.stabs) { grid-column: 2; min-width: 0; }
+#settingsForm > :not(h3):not(.stabs):not(.dlghead) { grid-column: 2; min-width: 0; }
 
 /* foldable side-menu sections */
 h6.navsec { cursor: pointer; user-select: none; display: flex; align-items: center; }
@@ -825,8 +825,9 @@ body.folded .navgrp.closed { display: flex; } /* icon-only menu keeps every icon
 /* Settings: window-style title bar */
 #settingsDlg { padding: 0; overflow: hidden; }
 #settingsForm { padding: 0 16px 16px; }
-#settingsForm > .dlghead { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin: 0 -16px 14px; padding: 9px 14px; background: var(--panel2); border-bottom: 1px solid var(--line); }
-#settingsForm > .dlghead b { font-size: 14px; }
+#settingsForm > .dlghead { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin: 0 -16px 14px; padding: 0 10px 0 14px; height: var(--titlebar-h, 28px); box-sizing: border-box; background: var(--panel2); border-bottom: 1px solid var(--line); }
+#settingsForm > .dlghead b { font-size: 13px; font-weight: 600; }
+#settingsForm > .dlghead button { padding: 0 6px; line-height: 1; }
 
 /* Environments page: foldable cards */
 .envcard { border-left: 3px solid var(--ec, var(--line)); }
