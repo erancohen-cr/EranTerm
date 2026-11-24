@@ -202,15 +202,16 @@ function openDebugConsole() {
 
 // ---------- menu / help ----------
 let manualWin;
-function openManual(hash) {
+function openManual(hash, page = 'manual.html') {
   hash = typeof hash === 'string' ? hash.replace(/[^\w-]/g, '') : ''; // menu clicks pass a MenuItem
+  if (typeof page !== 'string' || !['manual.html', 'privacy.html', 'terms.html'].includes(page)) page = 'manual.html';
   if (manualWin && !manualWin.isDestroyed()) {
-    if (hash) manualWin.loadFile('manual.html', { hash });
+    manualWin.loadFile(page, hash ? { hash } : undefined);
     return manualWin.focus();
   }
   manualWin = new BrowserWindow({ width: 900, height: 800, title: 'EranTerm User Manual', backgroundColor: '#0b0d10' });
   manualWin.setMenuBarVisibility(false);
-  manualWin.loadFile('manual.html', hash ? { hash } : undefined);
+  manualWin.loadFile(page, hash ? { hash } : undefined);
 }
 ipcMain.handle('help:manual', (_e, hash) => openManual(hash));
 function showVersion() {
@@ -232,7 +233,9 @@ function buildMenu() {
     { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
     { role: 'help', submenu: [
       { label: `Version ${app.getVersion()}`, click: showVersion },
-      { label: 'User Manual', accelerator: 'F1', click: openManual },
+      { label: 'User Manual', accelerator: 'F1', click: () => openManual() },
+      { label: 'Privacy Policy', click: () => openManual('', 'privacy.html') },
+      { label: 'Terms & Conditions', click: () => openManual('', 'terms.html') },
       { label: 'Log Console', accelerator: 'CmdOrCtrl+Shift+L', click: openDebugConsole },
       { type: 'separator' },
       { label: 'Check for Updates…', click: () => checkUpdates(true) },

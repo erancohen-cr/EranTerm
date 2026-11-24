@@ -19,6 +19,8 @@
       "index.html",
       "debug.html",
       "manual.html",
+      "privacy.html",
+      "terms.html",
       "style.css"
     ],
     "publish": {
