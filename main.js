@@ -19,9 +19,22 @@ const rpath = path.posix;
 
 // The app was first named "EraTerm". Keep that internal name: on macOS safeStorage's Keychain entry is
 // "<app name> Safe Storage", so a new name = a new key = every saved password/API key fails to decrypt.
-// Also keeps the same data folder. The visible name (window, menu, installer) is still EranTerm.
+// The visible name (window, menu, installer) and the data folder are EranTerm.
 app.setName('EraTerm');
-app.setPath('userData', path.join(app.getPath('appData'), 'EraTerm'));
+app.setPath('userData', migrateDataDir(path.join(app.getPath('appData'), 'EraTerm'), path.join(app.getPath('appData'), 'EranTerm')));
+// Data used to live in …/EraTerm, while Chromium also made a stray …/EranTerm (cache only). Move the data
+// once into EranTerm. The macOS key stays in the Keychain; on Windows it is in "Local State", which moves along.
+function migrateDataDir(oldDir, newDir) {
+  try {
+    if (!fs.existsSync(path.join(oldDir, 'servers.json')) || fs.existsSync(path.join(newDir, 'servers.json'))) return newDir;
+    fs.rmSync(newDir, { recursive: true, force: true }); // stray cache only (no servers.json)
+    fs.renameSync(oldDir, newDir);
+    return newDir;
+  } catch (e) {
+    console.error('data folder move failed, staying in', oldDir, e);
+    return fs.existsSync(path.join(oldDir, 'servers.json')) ? oldDir : newDir;
+  }
+}
 // Everything the user sees says EranTerm: logs folder, macOS app menu (labels set in buildMenu), About panel.
 const OLD_LOGS = app.getPath('logs');
 app.setAppLogsPath(isMacPlatform() ? path.join(os.homedir(), 'Library', 'Logs', 'EranTerm') : path.join(app.getPath('userData'), 'logs'));
@@ -304,7 +317,9 @@ ipcMain.handle('settings:setAutoUpdate', (_e, on) => {
 const logSettings = () => {
   const st = readJson('settings.json', {});
   // A saved folder equal to the old default (…/EraTerm logs) follows the new default.
-  return { logToFile: !!st.logToFile, logDir: st.logDir && st.logDir !== OLD_LOGS ? st.logDir : app.getPath('logs') };
+  // Same for a folder inside the old data folder (Windows default …\EraTerm\logs), which moved to EranTerm.
+  const old = st.logDir === OLD_LOGS || String(st.logDir || '').startsWith(path.join(app.getPath('appData'), 'EraTerm') + path.sep);
+  return { logToFile: !!st.logToFile, logDir: st.logDir && !old ? st.logDir : app.getPath('logs') };
 };
 ipcMain.handle('settings:setLog', (_e, { logToFile, logDir }) => {
   logDir = String(logDir || '').trim() || app.getPath('logs');
