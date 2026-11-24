@@ -24,14 +24,34 @@
   pre { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow: auto; }
   pre code { border: 0; padding: 0; background: none; }
   .note { border-left: 3px solid var(--accent); background: var(--panel); padding: 8px 12px; border-radius: 0 6px 6px 0; }
+  header.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 14px; padding: 8px 24px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header.top .logo { font-weight: 700; font-size: 18px; letter-spacing: -.02em; color: var(--fg); text-decoration: none; }
+  header.top .logo span { color: var(--accent); }
+  header.top .menu { display: flex; align-items: center; gap: 4px; }
+  header.top .menu a, header.top .menu button { color: var(--fg); background: none; border: 0; border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; text-decoration: none; }
+  header.top .menu a:hover, header.top .menu button:hover { background: var(--bg); color: var(--accent); }
+  header.top input { width: 220px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; font: inherit; }
+  header.top input:focus { outline: 0; border-color: var(--accent); }
+  header.top .grow { flex: 1; }
+  h2, nav { scroll-margin-top: 56px; }
 </style>
 </head>
 <body>
+<header class="top">
+  <a class="logo" href="#" title="Top">Eran<span>Term</span> <small class="muted">Manual</small></a>
+  <span class="menu">
+    <a href="#toc" title="Table of contents">☰ Contents</a>
+    <button id="print" title="Print or save as PDF">⎙ Print</button>
+  </span>
+  <span class="grow"></span>
+  <input id="q" type="search" placeholder="Search the manual…  (Enter = next, Shift+Enter = previous)" autocomplete="off">
+  <span class="menu"><button id="close" title="Close the manual (Esc)">✕ Close</button></span>
+</header>
 <main>
   <h1 class="brand">Eran<span>Term</span></h1>
   <p class="muted">User Manual. A local-first desktop manager for your servers: terminals, files, logs, metrics, deployments, and an AI assistant that only runs what you approve.</p>
 
-  <nav>
+  <nav id="toc">
     <a href="#start">Getting started</a>
     <a href="#home">Home: servers &amp; groups</a>
     <a href="#users">Users (saved logins)</a>
@@ -45,6 +65,8 @@
     <a href="#deploy">Deployments</a>
     <a href="#ai">AI assistant</a>
     <a href="#settings">Settings &amp; updates</a>
+    <a href="#account">Google account &amp; backup</a>
+    <a href="#team-setup">Setup: Google sign-in</a>
     <a href="#security">Security &amp; data</a>
   </nav>
 
@@ -139,13 +161,13 @@ journalctl -u {{service}} -n {{lines}} --no-pager</code></pre>
   <ul>
     <li><b>＋ Add server…</b> opens a terminal to a saved server. <b>＋ localhost</b> opens a terminal on this computer; add as many as you like, for example to <code>ssh</code> to machines that are not saved.</li>
     <li>Every key you type in a <b>checked</b> terminal (including Ctrl keys, arrows and paste) goes to all checked terminals. Checked terminals have a green border.</li>
-    <li>Uncheck a terminal to type into it alone, for example to answer a password prompt on one server. Turn off <b>Broadcast keystrokes</b> to type into each terminal separately.</li>
+    <li>Uncheck a terminal to type into it alone, for example to answer a password prompt on one server. Turn off <b>Broadcast Active</b> to type into each terminal separately.</li>
     <li><b>{ } Scripts</b> runs a script on every checked terminal, with its variables filled in.</li>
     <li>Each terminal has its own connection; closing it (×) disconnects only that one.</li>
     <li>A terminal whose connection failed or dropped, or whose shell ended, gets a red border. Click its <b>⟳</b> to reconnect it in place (the checkbox and position stay). <b>⟳ Reconnect all (n)</b> at the top reconnects every failed or not-yet-connected Broadcast terminal at once; it only touches Broadcast, not server tabs.</li>
-    <li>Order the terminals by dragging a terminal's title bar onto another position (works in normal and Minimized view), or click <b>⇅ Sort by group</b> to order them by server group (same order as the Home page, localhost last). The title bar takes its group's color.</li>
+    <li>Order the terminals by dragging a terminal's title bar onto another position (works in normal and Minimized view), or use the <b>⇅ Sort by…</b> menu (Groups, Availability, Name, IP; localhost last). Groups follows the Home page order. The title bar takes its group's color.</li>
     <li>The dot before each terminal's name shows the server's availability (green = up, red = not answering, grey = not checked).</li>
-    <li><b>Minimized</b> shrinks every terminal and its text so many fit on screen. Double-click a terminal to enlarge it for typing (the rest stay small); double-click it again, or another one, to switch. Uncheck Minimized to return all to normal.</li>
+    <li>The <b>Shrink view</b> button (9 small squares) shrinks every terminal and its text so many fit on screen. Double-click a terminal to enlarge it for typing (the rest stay small); double-click it again, or another one, to switch. Click <b>Normal view</b> (4 squares) to return all to normal.</li>
     <li><b>Keep after restart</b> reopens the same Broadcast terminals (and their checkboxes) next time the app starts. They are not connected automatically: click <b>⟳ Reconnect all</b> to connect them.</li>
   </ul>
 
@@ -235,12 +257,39 @@ journalctl -u {{service}} -n {{lines}} --no-pager</code></pre>
     <li><b>Help → Version</b> shows your version. <b>Help → Check for Updates…</b> checks right away. <b>Help → User Manual</b> (<kbd>F1</kbd>) opens this page.</li>
   </ul>
 
+  <h2 id="account">Google account &amp; backup</h2>
+  <p>Sign in with your own Google account (Gmail or a company account) in <b>Settings → Account</b>. Signing in is optional; without it EranTerm works as before, all on this computer.</p>
+  <ul>
+    <li><b>Backup to your Google Drive</b>: once signed in, your servers, saved users, groups, scripts, global variables, deployments, environments and settings are saved to your own Google Drive a few seconds after each change. They go to a hidden app folder: only EranTerm can see it, and it does not appear among your Drive files.</li>
+    <li><b>Other computers</b>: sign in with the same Google account and everything comes back. If both computers changed things, EranTerm asks which copy to keep.</li>
+    <li><b>Never backed up</b>: passwords, SSH keys and AI API keys. Enter them once on each computer. Logs, the Action Log and host keys also stay local.</li>
+    <li><b>Sync now</b> (Settings → Account) checks right away; EranTerm also checks at startup. <b>Sign out</b> keeps everything on this computer.</li>
+    <li>To remove the backup: Google Drive → ⚙ Settings → <b>Manage apps</b> → EranTerm → <b>Delete hidden app data</b>.</li>
+  </ul>
+  <p><b>Coming next</b>: team sharing (a team file in an admin's Google Drive, shared with the team) and in-app feedback.</p>
+
+  <h2 id="team-setup">One-time setup: Google sign-in</h2>
+  <p>For whoever builds EranTerm for the team, once. Google requires any app with "Sign in with Google" to be registered as an OAuth client. The registration holds <b>no user data</b>: each user's backup lives in their own Drive. Any Google account can own it. Until it's done, <b>Settings → Account</b> says sign-in is not set up.</p>
+  <ol>
+    <li>Go to <b>console.cloud.google.com</b> and create a project (e.g. <b>EranTerm</b>).</li>
+    <li><b>APIs &amp; Services → Library</b>: search for <b>Google Drive API</b> and click <b>Enable</b>.</li>
+    <li>Open <b>Google Auth Platform</b> (the OAuth consent screen):
+      <ul>
+        <li><b>Branding</b>: app name <code>EranTerm</code> and your email.</li>
+        <li><b>Audience</b>: <b>External</b>, then <b>Publish app</b> (so it is "In production"; in "Testing" sign-ins expire every 7 days).</li>
+        <li><b>Data access</b>: add <code>openid</code>, <code>email</code> and <code>.../auth/drive.appdata</code> (the app's own hidden Drive folder only).</li>
+      </ul></li>
+    <li><b>Clients → Create client → Desktop app</b>, name <code>EranTerm desktop</code>. Put the <b>Client ID</b> and <b>Client secret</b> in <code>CONFIG</code> at the top of <code>cloud.js</code>, then build. They are not secrets: desktop apps ship them by design.</li>
+    <li>In EranTerm: <b>Settings → Account → Sign in with Google</b>. If Google shows "Google hasn't verified this app", click <b>Advanced → Go to EranTerm</b>.</li>
+  </ol>
+
   <h2 id="security">Security &amp; data</h2>
   <ul>
     <li>Passwords and API keys are encrypted with your OS keychain and never leave your machine, except when they're used to log in or to call the AI provider.</li>
-    <li>Everything is stored locally: servers, users, groups, scripts, and settings. Nothing is synced to a cloud.</li>
+    <li>Everything is stored locally. If you sign in with Google, a copy of your configuration (without passwords or keys) is kept in your own Google Drive (see <a href="#account">Google account &amp; backup</a>).</li>
     <li>Host keys are pinned after the first connection.</li>
   </ul>
 </main>
+<script src="manual.js"></script>
 </body>
 </html>

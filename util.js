@@ -165,7 +165,7 @@ function remoteDir(d) {
 }
 
 // ---- script variables: {{name}} in a script; the script's local value wins over the global one ----
-const VAR_RE = /\{\{\s*([A-Za-z_]\w*)\s*\}\}/g; // ponytail: {{.Names}} / {{json .X}} (docker/go templates) never match
+const VAR_RE = /\{\{\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*\}\}/g; // {{name}} or {{envkey.name}} // ponytail: {{.Names}} / {{json .X}} (docker/go templates) never match
 // "name=value" lines <-> { name: value }. Blank lines and # comments are skipped.
 function parseVars(text) {
   const out = {};
@@ -177,10 +177,19 @@ function parseVars(text) {
 }
 const varsText = v => Object.entries(v || {}).map(([k, x]) => `${k}=${x}`).join('\n');
 // Returns { text, missing }: unknown names stay as they are and are listed in missing.
-function fillVars(text, local = {}, global = {}) {
+// Lookup: script's own (local) > target environment (env) > global. {{key.name}} reads environment `key` directly
+// (byKey: { envKey: { name: value } }).
+function fillVars(text, local = {}, global = {}, env = {}, byKey = {}) {
   const missing = new Set();
   const out = String(text).replace(VAR_RE, (all, k) => {
+    const [ek, name] = k.split('.');
+    if (name !== undefined) {
+      if (Object.hasOwn(byKey, ek) && Object.hasOwn(byKey[ek], name)) return byKey[ek][name];
+      missing.add(k);
+      return all;
+    }
     if (Object.hasOwn(local, k)) return local[k];
+    if (Object.hasOwn(env, k)) return env[k];
     if (Object.hasOwn(global, k)) return global[k];
     missing.add(k);
     return all;

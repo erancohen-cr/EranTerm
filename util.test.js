@@ -150,3 +150,11 @@ test('script variables: parse, local over global, unknown and go templates left 
   assert.strictEqual(scriptKeys('df -h', { confirm: true }), 'df -h');
   assert.strictEqual(scriptKeys('a\nb', { root: true }), "sudo sh -s <<'ERATERM_SCRIPT'\ra\rb\rERATERM_SCRIPT\r");
 });
+
+test('script variables: environment layer and {{envkey.name}}', () => {
+  const { fillVars } = require('./util');
+  const r = fillVars('{{a}} {{b}} {{c}} {{prod.db}} {{dev.db}} {{x.y}}', { a: 'L' }, { a: 'G', b: 'G', c: 'G' }, { a: 'E', b: 'E' },
+    { prod: { db: 'p1' }, dev: {} });
+  assert.strictEqual(r.text, 'L E G p1 {{dev.db}} {{x.y}}');
+  assert.deepStrictEqual(r.missing, ['dev.db', 'x.y']);
+});

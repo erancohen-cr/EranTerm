@@ -15,7 +15,7 @@ contextBridge.exposeInMainWorld('api', {
   },
   groups: {
     list: () => ipcRenderer.invoke('groups:list'),
-    save: (oldName, name, color) => ipcRenderer.invoke('groups:save', oldName, name, color),
+    save: (oldName, name, color, env) => ipcRenderer.invoke('groups:save', oldName, name, color, env),
     colors: () => ipcRenderer.invoke('groups:colors'),
     delete: name => ipcRenderer.invoke('groups:delete', name),
   },
@@ -31,6 +31,28 @@ contextBridge.exposeInMainWorld('api', {
     setLog: a => ipcRenderer.invoke('settings:setLog', a), // { logToFile, logDir }
     pickLogDir: cur => ipcRenderer.invoke('settings:pickLogDir', cur),
     setAvail: a => ipcRenderer.invoke('settings:setAvail', a), // { on, intervalSec }
+  },
+  envs: {
+    list: () => ipcRenderer.invoke('envs:list'), // { list: [{ id, key, name, color, shared, builtin, readOnly, vars }], groups: { name: envId } }
+    save: env => ipcRenderer.invoke('envs:save', env), // returns the id
+    delete: id => ipcRenderer.invoke('envs:delete', id),
+  },
+  account: {
+    get: () => ipcRenderer.invoke('account:get'),
+    signIn: () => ipcRenderer.invoke('account:signIn'),
+    signOut: () => ipcRenderer.invoke('account:signOut'),
+    syncNow: () => ipcRenderer.invoke('account:syncNow'),
+    onChanged: on('cloud:changed'), // team or synced config changed: reload lists
+  },
+  team: {
+    create: () => ipcRenderer.invoke('team:create'),
+    setMembers: a => ipcRenderer.invoke('team:setMembers', a), // { admins: [emails], members: [emails] }
+    publish: (kind, id) => ipcRenderer.invoke('team:publish', kind, id), // kind: server|script|deployment|vars
+    copyToPersonal: (kind, id) => ipcRenderer.invoke('team:copyToPersonal', kind, id),
+  },
+  feedback: {
+    send: text => ipcRenderer.invoke('feedback:send', text),
+    onOpen: on('ui:feedback'), // Help → Send Feedback…
   },
   avail: {
     get: () => ipcRenderer.invoke('avail:get'),
