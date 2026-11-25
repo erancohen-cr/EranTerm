@@ -26,8 +26,8 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "erancohen-cr",
-      "repo": "EranTerm"
+      "owner": "eranterm",
+      "repo": "eranterm"
     },
     "mac": {
       "target": [

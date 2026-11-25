@@ -253,7 +253,7 @@ function buildMenu() {
 // Feed = GitHub Releases (latest*.yml published by CI). Windows downloads in the background and installs on
 // quit / restart. ponytail: macOS can only self-install signed apps, so unsigned Mac builds just offer the
 // download page; set autoDownload = true on Mac once builds are signed + notarized.
-const RELEASES_URL = 'https://github.com/erancohen-cr/EranTerm/releases/latest';
+const RELEASES_URL = 'https://github.com/eranterm/eranterm/releases/latest';
 const isMac = process.platform === 'darwin';
 autoUpdater.autoDownload = !isMac;
 autoUpdater.on('error', e => console.error('update:', e?.message || e)); // no listener = crash on 'error'
