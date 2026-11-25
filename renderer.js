@@ -821,18 +821,36 @@ $('#addUserBtn').onclick = () => editUser();
 // ================= theme =================
 // ponytail: theme lives in localStorage (per-machine UI preference); falls back to System if storage is unavailable.
 const darkMq = matchMedia('(prefers-color-scheme: dark)');
-const allTerms = new Set(); // every xterm, so a theme switch restyles open sessions too
+const allTerms = new Map(); // every xterm -> its refit, so a theme/appearance change restyles open sessions too
 const getThemePref = () => { try { return localStorage.getItem('theme') || 'system'; } catch { return 'system'; } };
 const isLight = () => document.documentElement.dataset.theme === 'light';
-const termTheme = () => (isLight()
+// Settings → Appearance. ponytail: per-machine like the theme (localStorage); '' color = follow light/dark theme.
+const APPEAR_DEF = { termBg: '', termFg: '', termSize: 13, logSame: true, logBg: '', logFg: '', logSize: 12 };
+const getAppear = () => { try { return { ...APPEAR_DEF, ...JSON.parse(localStorage.getItem('appearance') || '{}') }; } catch { return { ...APPEAR_DEF }; } };
+let appear = getAppear();
+const MINI_FONT = 5; // Broadcast minimized panes keep their tiny font
+const termBase = () => (isLight()
   ? { background: '#ffffff', foreground: '#1d2127', cursor: '#1a9a3a', cursorAccent: '#ffffff', selectionBackground: '#1a9a3a40' }
   : { background: '#0b0d10', foreground: '#e3e6eb', cursor: '#3ddc5f', cursorAccent: '#0b0d10', selectionBackground: '#3ddc5f55' });
+const termTheme = () => {
+  const t = termBase();
+  if (appear.termBg) t.background = t.cursorAccent = appear.termBg;
+  if (appear.termFg) t.foreground = appear.termFg;
+  return t;
+};
 function applyTheme() {
   const pref = getThemePref();
   document.documentElement.dataset.theme = pref === 'system' ? (darkMq.matches ? 'dark' : 'light') : pref;
-  for (const term of allTerms) {
-    if (term.element?.isConnected) term.options.theme = termTheme();
-    else allTerms.delete(term); // disposed / closed
+  const tt = termTheme(), s = document.documentElement.style;
+  // Logs: "Same as terminal" copies the terminal's actual look, defaults included.
+  const [bg, fg, size] = appear.logSame ? [tt.background, tt.foreground, appear.termSize] : [appear.logBg, appear.logFg, appear.logSize];
+  bg ? s.setProperty('--log-bg', bg) : s.removeProperty('--log-bg');
+  fg ? s.setProperty('--log-fg', fg) : s.removeProperty('--log-fg');
+  s.setProperty('--log-size', size + 'px');
+  for (const [term, refit] of allTerms) {
+    if (!term.element?.isConnected) { allTerms.delete(term); continue; } // disposed / closed
+    term.options.theme = tt;
+    if (term.options.fontSize !== MINI_FONT && term.options.fontSize !== appear.termSize) { term.options.fontSize = appear.termSize; refit(); }
   }
 }
 darkMq.addEventListener('change', applyTheme);
@@ -869,6 +887,7 @@ async function openSettings(focusKey = false) {
   f.elements.notify.checked = notifyOn();
   f.elements.defaultPanel.value = defaultPanel();
   f.elements.restoreTabs.checked = restoreTabsOn();
+  fillAppear(f.elements, appear);
   $('#updHint').textContent = `You have version ${aiSettings.version}. Checks at startup and every 6 hours. Help → Check for Updates… checks now.`;
   f.elements.aiProvider.replaceChildren(...Object.entries(aiSettings.providers)
     .map(([value, d]) => el('option', { value, textContent: d.label + (d.hasKey ? '  ✓' : '') })));
@@ -1044,6 +1063,31 @@ function showAiError(target, err) {
 // Preview the theme while the dialog is open; Cancel/Esc restores the saved one.
 $('#settingsForm').elements.theme.onchange = e => { document.documentElement.dataset.theme =
   e.target.value === 'system' ? (darkMq.matches ? 'dark' : 'light') : e.target.value; };
+// Appearance tab: unticked colors show the theme default; any change previews live (Cancel/Esc restores).
+const fontPx = (v, d) => Math.min(32, Math.max(8, Math.round(Number(v)) || d));
+function fillAppear(f, a) {
+  const tb = termBase(), cs = getComputedStyle(document.documentElement);
+  for (const [k, def] of [['termBg', tb.background], ['termFg', tb.foreground],
+    ['logBg', cs.getPropertyValue('--bg').trim()], ['logFg', cs.getPropertyValue('--fg').trim()]]) {
+    f[k + 'On'].checked = !!a[k];
+    f[k].value = a[k] || def;
+  }
+  f.termSize.value = a.termSize; f.logSize.value = a.logSize;
+  f.logSame.checked = a.logSame;
+  $('#settingsForm .aplog').disabled = a.logSame;
+}
+const readAppear = f => ({
+  termBg: f.termBgOn.checked ? f.termBg.value : '', termFg: f.termFgOn.checked ? f.termFg.value : '',
+  termSize: fontPx(f.termSize.value, APPEAR_DEF.termSize), logSame: f.logSame.checked,
+  logBg: f.logBgOn.checked ? f.logBg.value : '', logFg: f.logFgOn.checked ? f.logFg.value : '',
+  logSize: fontPx(f.logSize.value, APPEAR_DEF.logSize),
+});
+const previewAppear = () => { const f = $('#settingsForm').elements; appear = readAppear(f); $('#settingsForm .aplog').disabled = appear.logSame; applyTheme(); };
+$('#settingsForm .appear').addEventListener('input', e => {
+  if (e.target.type === 'color') e.target.form.elements[e.target.name + 'On'].checked = true; // picking a color turns it on
+  previewAppear();
+});
+$('#appearReset').onclick = () => { fillAppear($('#settingsForm').elements, APPEAR_DEF); previewAppear(); };
 // Messages inside the dialog (it no longer closes on a failed save).
 const aiMsg = (text, kind = '') => { $('#aiMsg').textContent = text; $('#aiMsg').className = 'hint ' + kind; };
 const aiNoKeyText = e => cleanErr(e).replace(/^NO_API_KEY:\s*/, '').replace(/\s*(Update it|Add one)? ?in Settings → AI configuration\./, ' Check the key and try again.');
@@ -1068,13 +1112,13 @@ $('#settingsForm').addEventListener('submit', async e => {
       await api.settings.setAvail({ on: f.availOn.checked, intervalSec: f.availSec.value });
     }
     if (f.notify.checked && Notification.permission === 'default') Notification.requestPermission();
-    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); localStorage.setItem('restoreTabs', f.restoreTabs.checked ? 'on' : 'off'); } catch { /* ignore */ }
+    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); localStorage.setItem('restoreTabs', f.restoreTabs.checked ? 'on' : 'off'); localStorage.setItem('appearance', JSON.stringify(readAppear(f))); } catch { /* ignore */ }
     $('#settingsDlg').close('save');
     toast(`Settings saved. AI: ${aiSettings.providers[f.aiProvider.value].label}`);
   } catch (err) {
     aiMsg(aiNoKeyText(err), 'error');  } finally { btn.disabled = false; }
 });
-$('#settingsDlg').addEventListener('close', applyTheme);
+$('#settingsDlg').addEventListener('close', () => { appear = getAppear(); applyTheme(); });
 
 $('#aiLoadModels').onclick = async () => {
   const f = $('#settingsForm').elements;
@@ -1137,10 +1181,10 @@ function pushHist(serverId, cmd) {
 // opts.input(data): where typed keys go (Broadcast sends them to many shells); default: this shell.
 function makeTerm(host, connId, cwd, serverId, opts = {}) {
   const term = new Terminal({
-    cursorBlink: true, fontSize: 13, fontFamily: 'Menlo, monospace',
+    cursorBlink: true, fontSize: appear.termSize, fontFamily: 'Menlo, monospace',
     theme: termTheme(),
   });
-  allTerms.add(term);
+  allTerms.set(term, () => refit());
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(host);
@@ -1577,7 +1621,7 @@ function bcastRestore() {
 // Minimized view: small panes and tiny text; double-click one to enlarge it (one at a time).
 const bcastFont = p => {
   if (!p.t) return;
-  p.t.term.options.fontSize = bcast.mini && !p.el.classList.contains('big') ? 5 : 13;
+  p.t.term.options.fontSize = bcast.mini && !p.el.classList.contains('big') ? MINI_FONT : appear.termSize;
   p.t.refit();
 };
 function bcastMini() {
@@ -1780,6 +1824,8 @@ async function tabMenu(sid) {
     { id: 'all', label: 'Close all' },
     { id: 'others', label: 'Close other tabs', enabled: ids.length > 1 },
     { id: 'right', label: 'Close tabs to the right', enabled: i < ids.length - 1 },
+    { sep: true },
+    { id: 'appearance', label: 'Appearance…' },
   ]);
   const closeMany = list => { const cur = shownId; list.forEach(closeServer); if (views.has(cur)) show(cur); };
   ({
@@ -1791,6 +1837,7 @@ async function tabMenu(sid) {
     all: () => closeMany(ids),
     others: () => closeMany(ids.filter(x => x !== sid)),
     right: () => closeMany(ids.slice(i + 1)),
+    appearance: async () => { await openSettings(); settingsTab('appearance'); },
   })[pick]?.();
 }
 

@@ -197,7 +197,7 @@ dialog#scriptDlg { width: 560px; }
 .lv::before { background: var(--lvc); }
 .lv.on { color: var(--lvc); border-color: var(--lvc); background: color-mix(in srgb, var(--lvc) 14%, transparent); }
 .llive.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
-.lbody { flex: 1; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); padding: 4px 0; line-height: 1.6; }
+.lbody { flex: 1; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--log-bg, var(--bg)); color: var(--log-fg, var(--fg)); font-size: var(--log-size, 12px); padding: 4px 0; line-height: 1.6; }
 .lrow { display: flex; white-space: pre-wrap; word-break: break-all; padding: 0 10px; border-left: 2px solid transparent; }
 .lrow .ln { color: var(--dimmer); min-width: 52px; flex: none; user-select: none; }
 .lrow.info { color: var(--info); border-left-color: #3ddc5f66; }
@@ -491,6 +491,11 @@ dialog .dlgsec { margin: 14px 0 6px; font-size: 12px; letter-spacing: .06em; tex
 .stabs button { border: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); padding: 6px 10px; }
 .stabs button.on { background: var(--panel2); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
 .spane { min-height: 230px; }
+.appear h4 { margin: 4px 0 8px; color: var(--fg); }
+.appear .aplog { border: 0; padding: 0; margin: 0 0 6px; }
+.appear .aplog:disabled { opacity: .5; }
+.appear input[type=color] { width: 34px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: none; margin-left: auto; }
+.appear input[type=number] { width: 64px; margin-left: auto; }
 
 /* ---------- home: Alerts column ---------- */
 .alertcell { position: relative; white-space: nowrap; }
