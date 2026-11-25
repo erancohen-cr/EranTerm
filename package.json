@@ -21,7 +21,8 @@
       "manual.html",
       "privacy.html",
       "terms.html",
-      "style.css"
+      "style.css",
+      "google-oauth.json"
     ],
     "publish": {
       "provider": "github",

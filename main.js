@@ -764,7 +764,12 @@ ipcMain.on('ssh:resize', (_e, id, cols, rows) => shells.get(id)?.setWindow(rows,
 ipcMain.on('ssh:closeShell', (_e, id) => shells.get(id)?.close());
 
 // ponytail: renderer polls only the visible server; fleet-wide view would poll every server.
-ipcMain.handle('ssh:metrics', async (_e, connId) => parseMetrics(await exec(getConn(connId).conn, METRICS_CMD)));
+// Swallow exec failures here (e.g. channel open failure while the connection is closing) instead of
+// rejecting: this runs on a 5s background timer and the renderer already treats any failure as "no data".
+ipcMain.handle('ssh:metrics', async (_e, connId) => {
+  try { return parseMetrics(await exec(getConn(connId).conn, METRICS_CMD)); }
+  catch { return parseMetrics(''); }
+});
 ipcMain.handle('ssh:top', async (_e, connId, sortBy) =>
   parseTop(await exec(getConn(connId).conn, TOP_CMD(sortBy === 'mem' ? 'mem' : 'cpu'))));
 

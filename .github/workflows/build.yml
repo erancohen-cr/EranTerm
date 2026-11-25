@@ -28,6 +28,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      # Google sign-in client (not in git): the client's "Download JSON", stored as the GOOGLE_OAUTH_JSON secret.
+      # Without the secret the build still works; sign-in just says it is not set up.
+      - name: Google OAuth client
+        shell: bash
+        env:
+          GOOGLE_OAUTH_JSON: ${{ secrets.GOOGLE_OAUTH_JSON }}
+        run: '[ -z "$GOOGLE_OAUTH_JSON" ] || printf "%s" "$GOOGLE_OAUTH_JSON" > google-oauth.json'
       # package.json holds the last released version; a release is that + 1 patch (the release job commits
       # it back to main and dev). PR test builds are tagged as prereleases of the next version: 0.1.7-pr.12.
       # Bump major/minor by editing package.json by hand (e.g. 0.2.0 -> next release 0.2.1).

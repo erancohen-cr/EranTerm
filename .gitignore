@@ -6,4 +6,5 @@ dist/
 *.exe
 *.zip
 *.blockmap
-client_secret_85155709586-9vkk9n7tpf8htj69ndj30d0sg177st47.apps.googleusercontent.com.json
+client_secret_*.json
+google-oauth.json
