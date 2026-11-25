@@ -116,6 +116,15 @@ function show(id) {
   else views.get(id)?.onShow();
 }
 $('#homeTab').onclick = () => show('home');
+// Cmd+F (Mac) / Ctrl+F: jump to the Terminal Search box while a server's Terminal panel is showing
+// (capture phase, so xterm doesn't also send ^F to the shell).
+document.addEventListener('keydown', e => {
+  if (e.key.toLowerCase() !== 'f' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+  const v = views.get(shownId);
+  if (!v?.focusSearch || v.root.querySelector('.panel.term')?.hidden !== false) return;
+  e.preventDefault(); e.stopPropagation();
+  v.focusSearch();
+}, true);
 
 // Server tab + page header follow the server's group (name chip, gentle color). Re-run when groups change.
 function paintTabs() {
@@ -1230,6 +1239,50 @@ function makeTerm(host, connId, cwd, serverId, opts = {}) {
     api.ssh.resize(id, term.cols, term.rows); // size may have changed while the shell was opening
   }, e => term.writeln(`\x1b[31m${cleanErr(e)}\x1b[0m`));
   t.run = async cmd => { await t.ready; if (t.id) api.ssh.write(t.id, cmd); };
+  // ---- search: highlight every hit and put a red line on its row in the scrollbar ----
+  let hits = [], needleLen = 0, at = -1;
+  const rule = el('div', { className: 'srule' }); // red ticks over the scrollbar, one per hit row
+  const layer = el('div', { className: 'shl' });  // yellow boxes over the visible hits (own overlay: no xterm decoration API)
+  host.append(rule, layer);
+  function paint() {
+    layer.replaceChildren();
+    const screen = term.element?.querySelector('.xterm-screen');
+    if (!hits.length || !screen) return;
+    const hr = host.getBoundingClientRect(), sr = screen.getBoundingClientRect();
+    if (!sr.width || !term.cols) return;
+    const cw = sr.width / term.cols, ch = sr.height / term.rows, vy = term.buffer.active.viewportY;
+    hits.forEach((h, i) => {
+      if (h.y < vy || h.y >= vy + term.rows) return;
+      layer.append(el('i', { className: i === at ? 'cur' : '', style:
+        `left:${sr.left - hr.left + h.x * cw}px;top:${sr.top - hr.top + (h.y - vy) * ch}px;width:${needleLen * cw}px;height:${ch}px` }));
+    });
+  }
+  term.onScroll(paint); term.onResize(paint);
+  term.onWriteParsed(() => { if (hits.length) requestAnimationFrame(paint); });
+  t.clearSearch = () => { hits = []; at = -1; rule.replaceChildren(); layer.replaceChildren(); };
+  t.hitCount = () => hits.length;
+  t.search = str => { // case-insensitive substring; returns the number of hits (capped)
+    t.clearSearch();
+    const needle = str.toLowerCase();
+    if (!needle) return 0;
+    needleLen = needle.length;
+    const b = term.buffer.active, ticks = new Set();
+    for (let y = 0; y < b.length && hits.length < 2000; y++) {
+      const text = b.getLine(y)?.translateToString(true).toLowerCase() ?? '';
+      for (let x = text.indexOf(needle); x >= 0 && hits.length < 2000; x = text.indexOf(needle, x + needleLen)) { hits.push({ y, x }); ticks.add(y); }
+    }
+    rule.replaceChildren(...[...ticks].map(y => el('i', { style: `top:${(y / b.length) * 100}%` })));
+    paint();
+    return hits.length;
+  };
+  // step to the next (dir 1) or previous (-1) hit, wrapping; returns its 1-based number (0 = none)
+  t.jump = dir => {
+    if (!hits.length) return 0;
+    at = (at + dir + hits.length) % hits.length;
+    term.scrollToLine(Math.max(0, hits[at].y - 3));
+    paint();
+    return at + 1;
+  };
   t.refit = refit;
   t.dispose = () => {
     ro.disconnect();
@@ -1805,13 +1858,51 @@ async function openServer(s) {
       iconBtn('×', 'Close session', () => closeSession(sess), 'x'));
     q('.ttablist').append(sess.tabEl);
     sess.t = makeTerm(host, v.connId, cwd, s.id);
+    sess.t.term.onWriteParsed(() => { if (q('.tsearch').value) runSearch(); }); // new output may contain hits
     sessions.push(sess);
     activateSession(sess);
     return sess;
   }
 
+  // ---- terminal search (Current Tab / All Tabs) ----
+  let searchTimer = 0;
+  function runSearch(jump = false) {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      const str = q('.tsearch').value, all = q('.tscope').value === 'all';
+      let total = 0;
+      for (const x of sessions) {
+        const n = str && (all || x === active) ? x.t.search(str) : (x.t.clearSearch(), 0);
+        x.tabEl.classList.toggle('hit', n > 0 && all);
+        x.tabEl.title = n > 0 && all ? `${n} match${n > 1 ? 'es' : ''}` : '';
+        if (x === active || all) total += n;
+      }
+      lastTotal = total;
+      showCount(jump && active ? active.t.jump(1) : 0);
+    }, jump ? 0 : 200);
+  }
+  let lastTotal = 0;
+  const showCount = n => {
+    const str = q('.tsearch').value, mine = active ? active.t.hitCount() : 0;
+    q('.tcount').textContent = !str ? '' : !lastTotal ? 'No matches'
+      : q('.tscope').value === 'all' ? `${n ? n + ' of ' + mine : mine + ' here'} · ${lastTotal} total` : `${n ? n + ' of ' + mine : mine + ' match' + (mine === 1 ? '' : 'es')}`;
+    q('.tprev').disabled = q('.tnext').disabled = !mine;
+  };
+  const step = dir => active && showCount(active.t.jump(dir));
+  q('.tprev').onclick = () => step(-1);
+  q('.tnext').onclick = () => step(1);
+  q('.tsearch').oninput = () => runSearch(true);
+  q('.tscope').onchange = () => runSearch();
+  q('.tsearch').onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); step(e.key === 'ArrowDown' ? 1 : -1); }
+    if (e.key === 'Escape') { q('.tsearch').value = ''; runSearch(); active?.t.term.focus(); }
+  };
+  v.focusSearch = () => { q('.tsearch').focus(); q('.tsearch').select(); };
+
   function activateSession(sess) {
     active = sess;
+    if (q('.tsearch').value) runSearch();
     for (const x of sessions) {
       x.host.hidden = x !== sess;
       x.tabEl.classList.toggle('active', x === sess);
