@@ -4,6 +4,7 @@ const on = ch => cb => ipcRenderer.on(ch, (_e, ...a) => cb(...a));
 
 contextBridge.exposeInMainWorld('api', {
   pathForFile: f => webUtils.getPathForFile(f), // drag & drop upload
+  menu: items => ipcRenderer.invoke('menu:popup', items), // native right-click menu: [{ id, label, enabled } | { sep: true }]
   servers: {
     list: () => ipcRenderer.invoke('servers:list'),
     save: s => ipcRenderer.invoke('servers:save', s),
@@ -42,6 +43,9 @@ contextBridge.exposeInMainWorld('api', {
     signIn: () => ipcRenderer.invoke('account:signIn'),
     signOut: () => ipcRenderer.invoke('account:signOut'),
     syncNow: () => ipcRenderer.invoke('account:syncNow'),
+    backupNow: () => ipcRenderer.invoke('account:backupNow'),
+    restore: () => ipcRenderer.invoke('account:restore'),
+    setBackup: b => ipcRenderer.invoke('account:setBackup', b), // { onChange, periodic, every: 'day' | 'week' }
     onChanged: on('cloud:changed'), // team or synced config changed: reload lists
   },
   team: {
@@ -50,6 +54,7 @@ contextBridge.exposeInMainWorld('api', {
     publish: (kind, id) => ipcRenderer.invoke('team:publish', kind, id), // kind: server|script|deployment|vars
     copyToPersonal: (kind, id) => ipcRenderer.invoke('team:copyToPersonal', kind, id),
   },
+  ui: { onSettings: on('ui:settings') }, // application menu → Settings…
   feedback: {
     send: text => ipcRenderer.invoke('feedback:send', text),
     onOpen: on('ui:feedback'), // Help → Send Feedback…

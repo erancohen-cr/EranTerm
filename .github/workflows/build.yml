@@ -16,7 +16,10 @@ jobs:
     if: github.event.action != 'closed' || github.event.pull_request.merged
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        # macos-15-intel: GitHub's arm64 macOS runners often have no capacity (job cancelled after 15 min unstarted).
+        # The Mac build makes both arm64 and x64 files (package.json build.mac), so an Intel runner gives the same output.
+        # Windows paused (no Windows builds or releases until further notice): add windows-latest back to resume.
+        os: [macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +31,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      # Google sign-in client (not in git): the client's "Download JSON", stored as the GOOGLE_OAUTH_JSON secret.
+      # Without the secret the build still works; sign-in just says it is not set up.
+      - name: Google OAuth client
+        shell: bash
+        env:
+          GOOGLE_OAUTH_JSON: ${{ secrets.GOOGLE_OAUTH_JSON }}
+        run: '[ -z "$GOOGLE_OAUTH_JSON" ] || printf "%s" "$GOOGLE_OAUTH_JSON" > google-oauth.json'
       # package.json holds the last released version; a release is that + 1 patch (the release job commits
       # it back to main and dev). PR test builds are tagged as prereleases of the next version: 0.1.7-pr.12.
       # Bump major/minor by editing package.json by hand (e.g. 0.2.0 -> next release 0.2.1).
@@ -37,7 +47,7 @@ jobs:
           NEXT="$(node -p "const [a,b,c]=require('./package.json').version.split('.'); [a,b,+c+1].join('.')")"
           ${{ github.event.pull_request.merged && 'true' || 'false' }} || NEXT="$NEXT-pr.${{ github.event.number }}"
           npm version "$NEXT" --no-git-tag-version
-      - run: npx electron-builder ${{ matrix.os == 'macos-latest' && '--mac' || '--win' }} --publish never
+      - run: npx electron-builder ${{ startsWith(matrix.os, 'macos') && '--mac' || '--win' }} --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false # unsigned; drop this once you add signing certs
       - uses: actions/upload-artifact@v4

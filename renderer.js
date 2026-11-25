@@ -116,6 +116,15 @@ function show(id) {
   else views.get(id)?.onShow();
 }
 $('#homeTab').onclick = () => show('home');
+// Cmd+F (Mac) / Ctrl+F: jump to the Terminal Search box while a server's Terminal panel is showing
+// (capture phase, so xterm doesn't also send ^F to the shell).
+document.addEventListener('keydown', e => {
+  if (e.key.toLowerCase() !== 'f' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+  const v = views.get(shownId);
+  if (!v?.focusSearch || v.root.querySelector('.panel.term')?.hidden !== false) return;
+  e.preventDefault(); e.stopPropagation();
+  v.focusSearch();
+}, true);
 
 // Server tab + page header follow the server's group (name chip, gentle color). Re-run when groups change.
 function paintTabs() {
@@ -431,6 +440,71 @@ function renderServers() {
 const GROUP_PALETTE = ['#8fb3d9', '#8fc9a8', '#d9c48f', '#d9a38f', '#d98fa8', '#b39fd9', '#8fcfcf', '#b8c98f',
   '#5b8fd9', '#3fb77a', '#e0b030', '#e07a3f', '#e0527a', '#8a63d2', '#2fb5b5', '#8fb830',
   '#c9c9c9', '#8a8f98', '#a0714f', '#4a5fb0', '#d94f4f', '#e08fd0', '#6fd0a0', '#f0d060'];
+// ---- color picker: saturation/brightness surface + hue slider + HEX field, then quick-pick swatches ----
+const HEX = /^#[0-9a-f]{6}$/i;
+function hexToHsv(hex) {
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const max = Math.max(r, g, b), d = max - Math.min(r, g, b);
+  const h = !d ? 0 : max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, max ? d / max : 0, max];
+}
+function hsvToHex(h, s, v) {
+  const f = n => { const k = (n + h / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
+  return '#' + [f(5), f(3), f(1)].map(x => Math.round(x * 255).toString(16).padStart(2, '0')).join('');
+}
+// initial: a group's/environment's current color ('' = none). onChange(hex | '') on every change.
+function colorPicker(initial, onChange, disabled = false) {
+  let hex = HEX.test(initial || '') ? initial.toLowerCase() : '';
+  let [h, sat, val] = hex ? hexToHsv(hex) : [210, 0.5, 0.85];
+  const trigger = el('button', { type: 'button', className: 'cp-trigger', disabled });
+  const thumb = el('span', { className: 'cp-thumb' });
+  const surface = el('div', { className: 'cp-surface' }, thumb);
+  const hue = el('input', { type: 'range', className: 'cp-hue', min: 0, max: 360, step: 1 });
+  const field = el('input', { className: 'cp-hex mono', maxLength: 7, placeholder: '#rrggbb', spellcheck: false });
+  const swatches = el('div', { className: 'cp-swatches' });
+  const panel = el('div', { className: 'cp-panel', hidden: true }, surface, hue,
+    el('label', { className: 'cp-hexrow' }, el('small', { textContent: 'HEX' }), field),
+    swatches, el('button', { type: 'button', className: 'linkbtn', textContent: '✕ No color', onclick: () => set('', true) }));
+  const paint = () => {
+    const cur = hex || null;
+    surface.style.background = `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, hsl(${h} 100% 50%))`;
+    thumb.style.left = sat * 100 + '%';
+    thumb.style.top = (1 - val) * 100 + '%';
+    thumb.style.background = hsvToHex(h, sat, val);
+    hue.value = h;
+    if (document.activeElement !== field) field.value = hex;
+    trigger.replaceChildren(el('span', { className: 'cp-dot' + (cur ? '' : ' none'), style: cur ? `background:${cur}` : '' }),
+      el('span', { className: 'mono', textContent: cur || 'No color' }));
+    for (const b of swatches.children) b.classList.toggle('on', b.dataset.c === hex);
+  };
+  const set = (v, fromHex) => {
+    hex = v;
+    if (v && fromHex) [h, sat, val] = hexToHsv(v);
+    paint();
+    onChange(hex);
+  };
+  const fromHsv = () => set(hsvToHex(h, sat, val), false);
+  const drag = e => {
+    const r = surface.getBoundingClientRect();
+    sat = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    val = 1 - Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    fromHsv();
+  };
+  surface.onpointerdown = e => { surface.setPointerCapture(e.pointerId); drag(e); surface.onpointermove = drag; };
+  surface.onpointerup = () => { surface.onpointermove = null; };
+  hue.oninput = () => { h = +hue.value; fromHsv(); };
+  field.oninput = () => { const v = field.value.trim().toLowerCase(); if (HEX.test(v)) set(v, true); };
+  field.onblur = paint;
+  swatches.replaceChildren(...GROUP_PALETTE.map(c => {
+    const b = el('button', { type: 'button', className: 'sw', title: c, onclick: () => set(c, true) });
+    b.style.background = c;
+    b.dataset.c = c;
+    return b;
+  }));
+  trigger.onclick = () => { panel.hidden = !panel.hidden; };
+  paint();
+  return el('div', { className: 'cpick' }, trigger, panel);
+}
 const groupColor = g => (g && groupColors[g]) || '';
 // Tint an element with a group color (CSS uses --gc); no color = untouched.
 const tintGroup = (e, g) => { const c = groupColor(g); e.classList.toggle('gc', !!c); if (c) e.style.setProperty('--gc', c); else e.style.removeProperty('--gc'); return e; };
@@ -448,14 +522,7 @@ function editGroup(name = '', env = '') {
   $('#groupInfo').textContent = name ? `${n} server${n === 1 ? '' : 's'} in this group.` : '';
   f.querySelector('.gdel').hidden = !name;
   let color = groupColors[name] || '';
-  const paintSw = () => $('#groupColors').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.c === color));
-  $('#groupColors').replaceChildren(...['', ...GROUP_PALETTE].map(c => {
-    const b = el('button', { type: 'button', className: 'sw' + (c ? '' : ' none'), title: c || 'No color', onclick: () => { color = c; paintSw(); } });
-    b.dataset.c = c;
-    if (c) b.style.background = c;
-    return b;
-  }));
-  paintSw();
+  $('#groupColors').replaceChildren(colorPicker(color, c => { color = c; }));
   dlg.returnValue = '';
   dlg.showModal();
   dlg.addEventListener('close', async () => {
@@ -532,21 +599,14 @@ function editEnv(id) {
   f.elements.name.required = !e.builtin;
   $('#envShareInfo').textContent = e.shared ? '👥 Shared with your team: everyone in the team sees it. Only team admins change it.'
     : e.id === 'local' ? '👤 Your Local environment: your own servers, and the global variables as its parameters. Empty name = your account name.'
-      : '👤 Local: only you have it (backed up to your account when signed in).';
+      : '👤 Local Environment only. Shared environments will be available soon.';
   $('#envKey').textContent = e.key ? `Use {{name}} in scripts run on this environment's servers, or {{${e.key}.name}} from anywhere.` : 'Use {{name}} in scripts run on this environment\'s servers.';
   f.elements.vars.value = varsText(e.vars);
   f.elements.description.value = e.description || '';
   f.elements.description.disabled = e.id === 'team';
   f.elements.vars.disabled = ro;
   let color = e.color || '';
-  const paintSw = () => $('#envColors').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.c === color));
-  $('#envColors').replaceChildren(...['', ...GROUP_PALETTE].map(c => {
-    const b = el('button', { type: 'button', className: 'sw' + (c ? '' : ' none'), title: c || 'No color', disabled: e.id === 'team', onclick: () => { color = c; paintSw(); } });
-    b.dataset.c = c;
-    if (c) b.style.background = c;
-    return b;
-  }));
-  paintSw();
+  $('#envColors').replaceChildren(colorPicker(color, c => { color = c; }, e.id === 'team'));
   f.querySelector('.edel').hidden = !e.id || e.builtin;
   f.querySelector('.esave').hidden = ro;
   envTab('general');
@@ -761,18 +821,36 @@ $('#addUserBtn').onclick = () => editUser();
 // ================= theme =================
 // ponytail: theme lives in localStorage (per-machine UI preference); falls back to System if storage is unavailable.
 const darkMq = matchMedia('(prefers-color-scheme: dark)');
-const allTerms = new Set(); // every xterm, so a theme switch restyles open sessions too
+const allTerms = new Map(); // every xterm -> its refit, so a theme/appearance change restyles open sessions too
 const getThemePref = () => { try { return localStorage.getItem('theme') || 'system'; } catch { return 'system'; } };
 const isLight = () => document.documentElement.dataset.theme === 'light';
-const termTheme = () => (isLight()
+// Settings → Appearance. ponytail: per-machine like the theme (localStorage); '' color = follow light/dark theme.
+const APPEAR_DEF = { termBg: '', termFg: '', termSize: 13, logSame: true, logBg: '', logFg: '', logSize: 12 };
+const getAppear = () => { try { return { ...APPEAR_DEF, ...JSON.parse(localStorage.getItem('appearance') || '{}') }; } catch { return { ...APPEAR_DEF }; } };
+let appear = getAppear();
+const MINI_FONT = 5; // Broadcast minimized panes keep their tiny font
+const termBase = () => (isLight()
   ? { background: '#ffffff', foreground: '#1d2127', cursor: '#1a9a3a', cursorAccent: '#ffffff', selectionBackground: '#1a9a3a40' }
   : { background: '#0b0d10', foreground: '#e3e6eb', cursor: '#3ddc5f', cursorAccent: '#0b0d10', selectionBackground: '#3ddc5f55' });
+const termTheme = () => {
+  const t = termBase();
+  if (appear.termBg) t.background = t.cursorAccent = appear.termBg;
+  if (appear.termFg) t.foreground = appear.termFg;
+  return t;
+};
 function applyTheme() {
   const pref = getThemePref();
   document.documentElement.dataset.theme = pref === 'system' ? (darkMq.matches ? 'dark' : 'light') : pref;
-  for (const term of allTerms) {
-    if (term.element?.isConnected) term.options.theme = termTheme();
-    else allTerms.delete(term); // disposed / closed
+  const tt = termTheme(), s = document.documentElement.style;
+  // Logs: "Same as terminal" copies the terminal's actual look, defaults included.
+  const [bg, fg, size] = appear.logSame ? [tt.background, tt.foreground, appear.termSize] : [appear.logBg, appear.logFg, appear.logSize];
+  bg ? s.setProperty('--log-bg', bg) : s.removeProperty('--log-bg');
+  fg ? s.setProperty('--log-fg', fg) : s.removeProperty('--log-fg');
+  s.setProperty('--log-size', size + 'px');
+  for (const [term, refit] of allTerms) {
+    if (!term.element?.isConnected) { allTerms.delete(term); continue; } // disposed / closed
+    term.options.theme = tt;
+    if (term.options.fontSize !== MINI_FONT && term.options.fontSize !== appear.termSize) { term.options.fontSize = appear.termSize; refit(); }
   }
 }
 darkMq.addEventListener('change', applyTheme);
@@ -809,6 +887,7 @@ async function openSettings(focusKey = false) {
   f.elements.notify.checked = notifyOn();
   f.elements.defaultPanel.value = defaultPanel();
   f.elements.restoreTabs.checked = restoreTabsOn();
+  fillAppear(f.elements, appear);
   $('#updHint').textContent = `You have version ${aiSettings.version}. Checks at startup and every 6 hours. Help → Check for Updates… checks now.`;
   f.elements.aiProvider.replaceChildren(...Object.entries(aiSettings.providers)
     .map(([value, d]) => el('option', { value, textContent: d.label + (d.hasKey ? '  ✓' : '') })));
@@ -832,6 +911,8 @@ $('#logPick').onclick = async () => {
 $('#logOpen').onclick = () => api.log.openFolder();
 $('#logConsole').onclick = () => api.log.openConsole();
 $('#settingsBtn').onclick = () => openSettings();
+$('#ftSettings').onclick = () => openSettings();
+api.ui.onSettings(() => openSettings());
 $('#consoleBtn').onclick = () => api.log.openConsole();
 
 // ---- Settings → Account / Team (buttons act right away; they are not part of Save) ----
@@ -852,10 +933,30 @@ function renderAccount() {
         btn('Sign in with Google', b => acctAction(b, async () => { toast('Finish signing in in your browser…'); return api.account.signIn(); }, 'Signed in'), 'primary')]
       : [el('p', {}, 'Signed in as ', el('b', { textContent: a.email })),
         el('p', { className: 'hint', textContent: a.lastSyncAt ? `Last backup to your Google Drive: ${new Date(a.lastSyncAt).toLocaleString()}${a.pending ? ' · changes waiting to upload' : ''}` : 'Not backed up yet.' }),
+        backupOptions(a),
         el('span', { className: 'modelrow' },
-          btn('Sync now', b => acctAction(b, () => api.account.syncNow(), 'Synced')),
+          btn('Backup now', b => acctAction(b, () => api.account.backupNow(), 'Backed up')),
+          btn('Restore from backup', b => { if (confirm('Restore from backup? This replaces the servers, users, scripts, deployments and settings on this computer with the copy saved in your Google Drive. Passwords and keys stay as they are.')) acctAction(b, () => api.account.restore(), 'Restored from backup'); }),
           btn('Sign out', b => { if (confirm('Sign out? Your servers and settings stay on this computer; team items are hidden until you sign in again.')) acctAction(b, () => api.account.signOut(), 'Signed out'); }))]));
   renderTeam();
+}
+// Automatic backup choices: apply right away (they are not part of Save).
+function backupOptions(a) {
+  const b = { ...a.backup };
+  const onChange = el('input', { type: 'checkbox', checked: b.onChange });
+  const periodic = el('input', { type: 'checkbox', checked: b.periodic });
+  const every = el('select', { disabled: !b.periodic }, el('option', { value: 'day', textContent: 'Every day' }), el('option', { value: 'week', textContent: 'Every week' }));
+  every.value = b.every;
+  const save = async () => {
+    every.disabled = !periodic.checked;
+    try { acctInfo = await api.account.setBackup({ onChange: onChange.checked, periodic: periodic.checked, every: every.value }); } catch (e) { toast(cleanErr(e), true); }
+  };
+  onChange.onchange = periodic.onchange = every.onchange = save;
+  return el('div', { className: 'backupOpts' },
+    el('h4', { textContent: 'Automatic backup' }),
+    el('label', { className: 'row' }, onChange, ' On every change (about 4 seconds after)'),
+    el('label', { className: 'row' }, periodic, ' Periodic', every),
+    el('small', { className: 'muted', textContent: 'Periodic uploads waiting changes once the last backup is a day or a week old. With both off, use Backup now.' }));
 }
 function renderTeam() {
   const a = acctInfo, t = a.team;
@@ -863,7 +964,7 @@ function renderTeam() {
   if (!a.signedIn) return $('#teamBox').replaceChildren(el('p', { className: 'muted', textContent: 'Sign in (Account tab) to use a shared team workspace.' }), teamHelp());
   if (!t) {
     return $('#teamBox').replaceChildren(
-      el('p', { textContent: 'You are not on a team. Ask the team owner to add your email, then press Sync now in the Account tab.' }),
+      el('p', { textContent: 'You are not on a team. Ask the team owner to add your email, then press Backup now in the Account tab.' }),
       el('p', { className: 'hint', textContent: 'Setting up the team for the first time? Create it: you become its owner and add your teammates by email.' }),
       el('button', { type: 'button', textContent: 'Create team', onclick: e => acctAction(e.currentTarget, () => api.team.create(), 'Team created: you are the owner') }),
       teamHelp());
@@ -962,6 +1063,31 @@ function showAiError(target, err) {
 // Preview the theme while the dialog is open; Cancel/Esc restores the saved one.
 $('#settingsForm').elements.theme.onchange = e => { document.documentElement.dataset.theme =
   e.target.value === 'system' ? (darkMq.matches ? 'dark' : 'light') : e.target.value; };
+// Appearance tab: unticked colors show the theme default; any change previews live (Cancel/Esc restores).
+const fontPx = (v, d) => Math.min(32, Math.max(8, Math.round(Number(v)) || d));
+function fillAppear(f, a) {
+  const tb = termBase(), cs = getComputedStyle(document.documentElement);
+  for (const [k, def] of [['termBg', tb.background], ['termFg', tb.foreground],
+    ['logBg', cs.getPropertyValue('--bg').trim()], ['logFg', cs.getPropertyValue('--fg').trim()]]) {
+    f[k + 'On'].checked = !!a[k];
+    f[k].value = a[k] || def;
+  }
+  f.termSize.value = a.termSize; f.logSize.value = a.logSize;
+  f.logSame.checked = a.logSame;
+  $('#settingsForm .aplog').disabled = a.logSame;
+}
+const readAppear = f => ({
+  termBg: f.termBgOn.checked ? f.termBg.value : '', termFg: f.termFgOn.checked ? f.termFg.value : '',
+  termSize: fontPx(f.termSize.value, APPEAR_DEF.termSize), logSame: f.logSame.checked,
+  logBg: f.logBgOn.checked ? f.logBg.value : '', logFg: f.logFgOn.checked ? f.logFg.value : '',
+  logSize: fontPx(f.logSize.value, APPEAR_DEF.logSize),
+});
+const previewAppear = () => { const f = $('#settingsForm').elements; appear = readAppear(f); $('#settingsForm .aplog').disabled = appear.logSame; applyTheme(); };
+$('#settingsForm .appear').addEventListener('input', e => {
+  if (e.target.type === 'color') e.target.form.elements[e.target.name + 'On'].checked = true; // picking a color turns it on
+  previewAppear();
+});
+$('#appearReset').onclick = () => { fillAppear($('#settingsForm').elements, APPEAR_DEF); previewAppear(); };
 // Messages inside the dialog (it no longer closes on a failed save).
 const aiMsg = (text, kind = '') => { $('#aiMsg').textContent = text; $('#aiMsg').className = 'hint ' + kind; };
 const aiNoKeyText = e => cleanErr(e).replace(/^NO_API_KEY:\s*/, '').replace(/\s*(Update it|Add one)? ?in Settings → AI configuration\./, ' Check the key and try again.');
@@ -986,13 +1112,13 @@ $('#settingsForm').addEventListener('submit', async e => {
       await api.settings.setAvail({ on: f.availOn.checked, intervalSec: f.availSec.value });
     }
     if (f.notify.checked && Notification.permission === 'default') Notification.requestPermission();
-    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); localStorage.setItem('restoreTabs', f.restoreTabs.checked ? 'on' : 'off'); } catch { /* ignore */ }
+    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); localStorage.setItem('restoreTabs', f.restoreTabs.checked ? 'on' : 'off'); localStorage.setItem('appearance', JSON.stringify(readAppear(f))); } catch { /* ignore */ }
     $('#settingsDlg').close('save');
     toast(`Settings saved. AI: ${aiSettings.providers[f.aiProvider.value].label}`);
   } catch (err) {
     aiMsg(aiNoKeyText(err), 'error');  } finally { btn.disabled = false; }
 });
-$('#settingsDlg').addEventListener('close', applyTheme);
+$('#settingsDlg').addEventListener('close', () => { appear = getAppear(); applyTheme(); });
 
 $('#aiLoadModels').onclick = async () => {
   const f = $('#settingsForm').elements;
@@ -1055,10 +1181,10 @@ function pushHist(serverId, cmd) {
 // opts.input(data): where typed keys go (Broadcast sends them to many shells); default: this shell.
 function makeTerm(host, connId, cwd, serverId, opts = {}) {
   const term = new Terminal({
-    cursorBlink: true, fontSize: 13, fontFamily: 'Menlo, monospace',
+    cursorBlink: true, fontSize: appear.termSize, fontFamily: 'Menlo, monospace',
     theme: termTheme(),
   });
-  allTerms.add(term);
+  allTerms.set(term, () => refit());
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(host);
@@ -1157,6 +1283,50 @@ function makeTerm(host, connId, cwd, serverId, opts = {}) {
     api.ssh.resize(id, term.cols, term.rows); // size may have changed while the shell was opening
   }, e => term.writeln(`\x1b[31m${cleanErr(e)}\x1b[0m`));
   t.run = async cmd => { await t.ready; if (t.id) api.ssh.write(t.id, cmd); };
+  // ---- search: highlight every hit and put a red line on its row in the scrollbar ----
+  let hits = [], needleLen = 0, at = -1;
+  const rule = el('div', { className: 'srule' }); // red ticks over the scrollbar, one per hit row
+  const layer = el('div', { className: 'shl' });  // yellow boxes over the visible hits (own overlay: no xterm decoration API)
+  host.append(rule, layer);
+  function paint() {
+    layer.replaceChildren();
+    const screen = term.element?.querySelector('.xterm-screen');
+    if (!hits.length || !screen) return;
+    const hr = host.getBoundingClientRect(), sr = screen.getBoundingClientRect();
+    if (!sr.width || !term.cols) return;
+    const cw = sr.width / term.cols, ch = sr.height / term.rows, vy = term.buffer.active.viewportY;
+    hits.forEach((h, i) => {
+      if (h.y < vy || h.y >= vy + term.rows) return;
+      layer.append(el('i', { className: i === at ? 'cur' : '', style:
+        `left:${sr.left - hr.left + h.x * cw}px;top:${sr.top - hr.top + (h.y - vy) * ch}px;width:${needleLen * cw}px;height:${ch}px` }));
+    });
+  }
+  term.onScroll(paint); term.onResize(paint);
+  term.onWriteParsed(() => { if (hits.length) requestAnimationFrame(paint); });
+  t.clearSearch = () => { hits = []; at = -1; rule.replaceChildren(); layer.replaceChildren(); };
+  t.hitCount = () => hits.length;
+  t.search = str => { // case-insensitive substring; returns the number of hits (capped)
+    t.clearSearch();
+    const needle = str.toLowerCase();
+    if (!needle) return 0;
+    needleLen = needle.length;
+    const b = term.buffer.active, ticks = new Set();
+    for (let y = 0; y < b.length && hits.length < 2000; y++) {
+      const text = b.getLine(y)?.translateToString(true).toLowerCase() ?? '';
+      for (let x = text.indexOf(needle); x >= 0 && hits.length < 2000; x = text.indexOf(needle, x + needleLen)) { hits.push({ y, x }); ticks.add(y); }
+    }
+    rule.replaceChildren(...[...ticks].map(y => el('i', { style: `top:${(y / b.length) * 100}%` })));
+    paint();
+    return hits.length;
+  };
+  // step to the next (dir 1) or previous (-1) hit, wrapping; returns its 1-based number (0 = none)
+  t.jump = dir => {
+    if (!hits.length) return 0;
+    at = (at + dir + hits.length) % hits.length;
+    term.scrollToLine(Math.max(0, hits[at].y - 3));
+    paint();
+    return at + 1;
+  };
   t.refit = refit;
   t.dispose = () => {
     ro.disconnect();
@@ -1451,7 +1621,7 @@ function bcastRestore() {
 // Minimized view: small panes and tiny text; double-click one to enlarge it (one at a time).
 const bcastFont = p => {
   if (!p.t) return;
-  p.t.term.options.fontSize = bcast.mini && !p.el.classList.contains('big') ? 5 : 13;
+  p.t.term.options.fontSize = bcast.mini && !p.el.classList.contains('big') ? MINI_FONT : appear.termSize;
   p.t.refit();
 };
 function bcastMini() {
@@ -1631,6 +1801,46 @@ function closeServer(serverId) {
   show('home');
 }
 
+// Right-click on a server tab.
+function serverDetails(s) {
+  const a = avail[s.id], e = envById(envOfServer(s));
+  const rows = [['Name', s.name], ['Host', s.host], ['User', s.username], ['Port', s.port], ['Type', !s.local && typeOf(s).toUpperCase()],
+    ['Group', s.group], ['Environment', e && `${envIcon(e)} ${e.name}`], ['Tags', s.tags?.join(', ')], ['OS', s.os], ['Details', s.details],
+    ['Reachable', a && `${a.server === 'up' ? 'yes' : 'no'} · checked ${new Date(a.at).toLocaleString()}`]].filter(r => r[1]);
+  ask({ title: s.name, ok: 'Close', body: el('table', { className: 'kv' },
+    ...rows.map(([k, val]) => el('tr', {}, el('td', { className: 'muted', textContent: k }), el('td', { className: 'mono', textContent: String(val) })))) });
+}
+async function tabMenu(sid) {
+  const v = views.get(sid), s = servers.find(x => x.id === sid) || v.server;
+  const ids = tabIds(), i = ids.indexOf(sid), failed = [...views.values()].filter(x => x.failed).length;
+  const pick = await api.menu([
+    { id: 'details', label: 'Get server details' },
+    { id: 'edit', label: 'Edit Server', enabled: !s.local },
+    { sep: true },
+    { id: 'reconnect', label: 'Reconnect', enabled: !v.connId || v.failed },
+    { id: 'failed', label: `Reconnect failed${failed ? ` (${failed})` : ''}`, enabled: !!failed },
+    { sep: true },
+    { id: 'close', label: `Close ${s.name}` },
+    { id: 'all', label: 'Close all' },
+    { id: 'others', label: 'Close other tabs', enabled: ids.length > 1 },
+    { id: 'right', label: 'Close tabs to the right', enabled: i < ids.length - 1 },
+    { sep: true },
+    { id: 'appearance', label: 'Appearance…' },
+  ]);
+  const closeMany = list => { const cur = shownId; list.forEach(closeServer); if (views.has(cur)) show(cur); };
+  ({
+    details: () => serverDetails(s),
+    edit: () => editServer(s),
+    reconnect: () => reconnect(sid),
+    failed: () => $('#reconnAll').click(),
+    close: () => closeServer(sid),
+    all: () => closeMany(ids),
+    others: () => closeMany(ids.filter(x => x !== sid)),
+    right: () => closeMany(ids.slice(i + 1)),
+    appearance: async () => { await openSettings(); settingsTab('appearance'); },
+  })[pick]?.();
+}
+
 async function openServer(s) {
   if (views.has(s.id)) return show(s.id);
 
@@ -1643,6 +1853,7 @@ async function openServer(s) {
   $('#tabs .tabtools').before(tabEl);
 
   tabEl.dataset.sid = s.id;
+  tabEl.oncontextmenu = e => { e.preventDefault(); tabMenu(s.id); };
   const v = { root, tabEl, connId: null, panel: 'files', server: s, failed: false };
   views.set(s.id, v);
   saveTabs();
@@ -1694,13 +1905,51 @@ async function openServer(s) {
       iconBtn('×', 'Close session', () => closeSession(sess), 'x'));
     q('.ttablist').append(sess.tabEl);
     sess.t = makeTerm(host, v.connId, cwd, s.id);
+    sess.t.term.onWriteParsed(() => { if (q('.tsearch').value) runSearch(); }); // new output may contain hits
     sessions.push(sess);
     activateSession(sess);
     return sess;
   }
 
+  // ---- terminal search (Current Tab / All Tabs) ----
+  let searchTimer = 0;
+  function runSearch(jump = false) {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      const str = q('.tsearch').value, all = q('.tscope').value === 'all';
+      let total = 0;
+      for (const x of sessions) {
+        const n = str && (all || x === active) ? x.t.search(str) : (x.t.clearSearch(), 0);
+        x.tabEl.classList.toggle('hit', n > 0 && all);
+        x.tabEl.title = n > 0 && all ? `${n} match${n > 1 ? 'es' : ''}` : '';
+        if (x === active || all) total += n;
+      }
+      lastTotal = total;
+      showCount(jump && active ? active.t.jump(1) : 0);
+    }, jump ? 0 : 200);
+  }
+  let lastTotal = 0;
+  const showCount = n => {
+    const str = q('.tsearch').value, mine = active ? active.t.hitCount() : 0;
+    q('.tcount').textContent = !str ? '' : !lastTotal ? 'No matches'
+      : q('.tscope').value === 'all' ? `${n ? n + ' of ' + mine : mine + ' here'} · ${lastTotal} total` : `${n ? n + ' of ' + mine : mine + ' match' + (mine === 1 ? '' : 'es')}`;
+    q('.tprev').disabled = q('.tnext').disabled = !mine;
+  };
+  const step = dir => active && showCount(active.t.jump(dir));
+  q('.tprev').onclick = () => step(-1);
+  q('.tnext').onclick = () => step(1);
+  q('.tsearch').oninput = () => runSearch(true);
+  q('.tscope').onchange = () => runSearch();
+  q('.tsearch').onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); step(e.key === 'ArrowDown' ? 1 : -1); }
+    if (e.key === 'Escape') { q('.tsearch').value = ''; runSearch(); active?.t.term.focus(); }
+  };
+  v.focusSearch = () => { q('.tsearch').focus(); q('.tsearch').select(); };
+
   function activateSession(sess) {
     active = sess;
+    if (q('.tsearch').value) runSearch();
     for (const x of sessions) {
       x.host.hidden = x !== sess;
       x.tabEl.classList.toggle('active', x === sess);
@@ -2575,7 +2824,7 @@ async function moveGroup(g, envId) {
   try { await api.groups.save(g, g, groupColors[g] || '', envId); toast(`Group ${g} moved to ${envById(envId)?.name}`); await refreshServers(); } catch (err) { toast(cleanErr(err), true); }
 }
 // Environments page state: cards start folded; groups inside start open.
-const stop = fn => ev => { ev.stopPropagation(); fn(ev); }; // header buttons must not also fold the card
+// (iconBtn stops the click, so header buttons don't also fold the card.)
 const envUi = { open: new Set(), shut: new Set(), q: '', sort: '' };
 function renderEnvPage() {
   $('#envsBadge').textContent = `${envs.list.length}`;
@@ -2607,7 +2856,7 @@ function renderEnvPage() {
           el('span', { className: 'caret', textContent: shut ? '▸' : '▾' }), el('b', { textContent: g }),
           el('small', { className: 'muted', textContent: `${members.length} server${members.length === 1 ? '' : 's'}` }),
           el('span', { className: 'grow' }), sel,
-          iconBtn('✎', `Edit group ${g}`, stop(() => editGroup(g)))),
+          iconBtn('✎', `Edit group ${g}`, () => editGroup(g))),
         shut ? null : chips(q ? members.filter(s => !has(g) && !has(e.name) ? srvMatch(s) : true) : members)), g);
     });
     const card = el('section', { className: 'dcard envcard' + (open ? '' : ' folded') },
@@ -2616,9 +2865,9 @@ function renderEnvPage() {
         el('b', { textContent: `${envIcon(e)} ${e.name}` }),
         el('small', { className: 'muted', textContent: `${nGroups} · ${nSrv}` }),
         el('span', { className: 'grow' }),
-        ...(e.id === 'team' ? [] : [iconBtn('＋', 'New group in this environment', stop(() => editGroup('', e.id)))]),
-        iconBtn('✎', 'Edit environment (name, description, color, parameters)', stop(() => editEnv(e.id))),
-        ...(!e.builtin ? [iconBtn('🗑', 'Delete environment', stop(() => deleteEnv(e)), 'icon danger')] : [])),
+        ...(e.id === 'team' ? [] : [iconBtn('＋', 'New group in this environment', () => editGroup('', e.id))]),
+        iconBtn('✎', 'Edit environment (name, description, color, parameters)', () => editEnv(e.id)),
+        ...(!e.builtin ? [iconBtn('🗑', 'Delete environment', () => deleteEnv(e), 'icon danger')] : [])),
       // folded: short summary line (description, group names)
       !open ? el('div', { className: 'envsum' },
         e.description ? el('span', { textContent: e.description }) : null,
@@ -2660,3 +2909,38 @@ function paintAcct() {
       onclick: async () => { await openSettings(); settingsTab('account'); } }));
 }
 paintAcct();
+
+// ================= feature flags (hidden Settings tab: click "Notifications" 10 times) =================
+// Add a feature: put it here and tag its element data-feature="<id>"; off = hidden. Default is `on`.
+const FEATURES = [
+  { id: 'envs', label: 'Environments page', desc: 'Side menu → Environments: manage environments, groups and servers.', on: true },
+];
+const flagState = () => { try { return JSON.parse(localStorage.getItem('featureFlags')) || {}; } catch { return {}; } };
+const featureOn = id => flagState()[id] ?? FEATURES.find(f => f.id === id)?.on ?? false;
+function applyFeatures() {
+  for (const e of document.querySelectorAll('[data-feature]')) e.hidden = !featureOn(e.dataset.feature);
+  if (!featureOn('envs') && homeMode === 'envs') setMode('all');
+}
+function renderFlags() {
+  $('#flagsList').replaceChildren(...FEATURES.map(f => {
+    const cb = el('input', { type: 'checkbox', checked: featureOn(f.id) });
+    cb.onchange = () => {
+      try { localStorage.setItem('featureFlags', JSON.stringify({ ...flagState(), [f.id]: cb.checked })); } catch { /* not remembered */ }
+      applyFeatures();
+    };
+    return el('label', { className: 'row' }, cb, el('b', { textContent: f.label }), el('small', { className: 'muted', textContent: ' — ' + f.desc }));
+  }));
+}
+{
+  const tab = $('#flagsTab'), notify = document.querySelector('#settingsForm [data-tab="notify"]');
+  let clicks = 0;
+  try { tab.hidden = localStorage.getItem('flagsRevealed') !== '1'; } catch { /* stays hidden */ }
+  notify.addEventListener('click', () => {
+    if (!tab.hidden || ++clicks < 10) return;
+    tab.hidden = false;
+    try { localStorage.setItem('flagsRevealed', '1'); } catch { /* revealed for this session only */ }
+    toast('Feature flags unlocked');
+  });
+  tab.addEventListener('click', renderFlags);
+  applyFeatures();
+}

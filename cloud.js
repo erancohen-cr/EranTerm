@@ -1,14 +1,19 @@
 // Google sign-in + backup to the user's OWN Google Drive, over plain REST: no SDK, no server, no new dependencies.
 // The backup is one file in the app's hidden Drive folder (appDataFolder): only EranTerm can see it.
 // CONFIG = the app's registration (Google Cloud → Google Auth Platform → Clients → Desktop app). It holds no user data.
-// None of these values are secret: a desktop OAuth client's "secret" ships in every desktop app by design.
+// It is read from google-oauth.json next to this file: the client's "Download JSON" from Google, as is.
+// That file is not committed (.gitignore); CI writes it from the GOOGLE_OAUTH_JSON repository secret.
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
 
-const CONFIG = {
-  googleClientId: '',     // Desktop app client ID
-  googleClientSecret: '', // same client
-};
+const CONFIG = (() => {
+  try {
+    const c = Object.values(JSON.parse(fs.readFileSync(path.join(__dirname, 'google-oauth.json'), 'utf8')))[0]; // { installed: {...} }
+    return { googleClientId: c.client_id || '', googleClientSecret: c.client_secret || '' };
+  } catch { return { googleClientId: '', googleClientSecret: '' }; } // no file: sign-in shows "not set up"
+})();
 const configured = () => !!(CONFIG.googleClientId && CONFIG.googleClientSecret);
 const SCOPES = 'openid email https://www.googleapis.com/auth/drive.appdata';
 
@@ -114,7 +119,7 @@ ${ok ? '<h2>Signed in to EranTerm ✓</h2><p>You can close this tab and go back 
 
 // Google OAuth for installed apps: system browser + loopback redirect + PKCE. openUrl = shell.openExternal.
 async function signIn(openUrl, timeoutMs = 300e3) {
-  if (!configured()) throw new Error('Google sign-in is not set up in this build (cloud.js CONFIG is empty).');
+  if (!configured()) throw new Error('Google sign-in is not set up in this build (google-oauth.json is missing).');
   const verifier = b64url(crypto.randomBytes(32));
   const challenge = b64url(crypto.createHash('sha256').update(verifier).digest());
   const state = b64url(crypto.randomBytes(16));

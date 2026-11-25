@@ -153,6 +153,9 @@ const AUDIT = {
   'settings:setAi': a => ({ action: 'settings.ai', detail: `${a.provider}${a.model ? ' · ' + a.model : ''}${a.key ? ' · new key' : ''}` }),
   'settings:setAvail': a => ({ action: 'settings.availability', detail: `${onOff(a.on)} · every ${a.intervalSec}s` }),
   'account:signIn': () => ({ action: 'account.signIn' }),
+  'account:backupNow': () => ({ action: 'account.backup' }),
+  'account:restore': () => ({ action: 'account.restore' }),
+  'account:setBackup': b => ({ action: 'account.backupSettings', detail: `${b.onChange ? 'on every change' : ''}${b.onChange && b.periodic ? ' + ' : ''}${b.periodic ? 'every ' + b.every : ''}` || 'off' }),
   'account:signOut': () => ({ action: 'account.signOut', target: acct()?.email }),
   'team:create': () => ({ action: 'team.create', target: acct()?.email }),
   'team:setMembers': a => ({ action: 'team.members', detail: `${(a.admins || []).length} admin(s), ${(a.members || []).length} member(s)` }),
@@ -202,17 +205,25 @@ function openDebugConsole() {
 
 // ---------- menu / help ----------
 let manualWin;
-function openManual(hash) {
+function openManual(hash, page = 'manual.html') {
   hash = typeof hash === 'string' ? hash.replace(/[^\w-]/g, '') : ''; // menu clicks pass a MenuItem
+  if (typeof page !== 'string' || !['manual.html', 'privacy.html', 'terms.html'].includes(page)) page = 'manual.html';
   if (manualWin && !manualWin.isDestroyed()) {
-    if (hash) manualWin.loadFile('manual.html', { hash });
+    manualWin.loadFile(page, hash ? { hash } : undefined);
     return manualWin.focus();
   }
   manualWin = new BrowserWindow({ width: 900, height: 800, title: 'EranTerm User Manual', backgroundColor: '#0b0d10' });
   manualWin.setMenuBarVisibility(false);
-  manualWin.loadFile('manual.html', hash ? { hash } : undefined);
+  manualWin.loadFile(page, hash ? { hash } : undefined);
 }
 ipcMain.handle('help:manual', (_e, hash) => openManual(hash));
+// Native context menu; resolves the clicked item's id (null when dismissed).
+ipcMain.handle('menu:popup', (e, items) => new Promise(res => {
+  let picked = null;
+  Menu.buildFromTemplate(items.map(i => (i.sep ? { type: 'separator' }
+    : { label: i.label, enabled: i.enabled !== false, click: () => { picked = i.id; } })))
+    .popup({ window: BrowserWindow.fromWebContents(e.sender), callback: () => setImmediate(() => res(picked)) });
+}));
 function showVersion() {
   dialog.showMessageBox(win, {
     message: `EranTerm ${app.getVersion()}`,
@@ -225,14 +236,19 @@ function buildMenu() {
     // Explicit labels: the role defaults use the internal app name ("Quit EraTerm").
     ...(process.platform === 'darwin' ? [{ label: 'EranTerm', submenu: [
       { role: 'about', label: 'About EranTerm' }, { type: 'separator' },
+      { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('ui:settings') }, { type: 'separator' },
       { role: 'services' }, { type: 'separator' },
       { role: 'hide', label: 'Hide EranTerm' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' },
       { role: 'quit', label: 'Quit EranTerm' },
     ] }] : []),
-    { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
+    process.platform === 'darwin' ? { role: 'fileMenu' } : { label: 'File', submenu: [
+      { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('ui:settings') }, { type: 'separator' }, { role: 'quit' }] },
+    { role: 'editMenu' }, { role: 'viewMenu' }, { role: 'windowMenu' },
     { role: 'help', submenu: [
       { label: `Version ${app.getVersion()}`, click: showVersion },
-      { label: 'User Manual', accelerator: 'F1', click: openManual },
+      { label: 'User Manual', accelerator: 'F1', click: () => openManual() },
+      { label: 'Privacy Policy', click: () => openManual('', 'privacy.html') },
+      { label: 'Terms & Conditions', click: () => openManual('', 'terms.html') },
       { label: 'Log Console', accelerator: 'CmdOrCtrl+Shift+L', click: openDebugConsole },
       { type: 'separator' },
       { label: 'Check for Updates…', click: () => checkUpdates(true) },
@@ -761,7 +777,12 @@ ipcMain.on('ssh:resize', (_e, id, cols, rows) => shells.get(id)?.setWindow(rows,
 ipcMain.on('ssh:closeShell', (_e, id) => shells.get(id)?.close());
 
 // ponytail: renderer polls only the visible server; fleet-wide view would poll every server.
-ipcMain.handle('ssh:metrics', async (_e, connId) => parseMetrics(await exec(getConn(connId).conn, METRICS_CMD)));
+// Swallow exec failures here (e.g. channel open failure while the connection is closing) instead of
+// rejecting: this runs on a 5s background timer and the renderer already treats any failure as "no data".
+ipcMain.handle('ssh:metrics', async (_e, connId) => {
+  try { return parseMetrics(await exec(getConn(connId).conn, METRICS_CMD)); }
+  catch { return parseMetrics(''); }
+});
 ipcMain.handle('ssh:top', async (_e, connId, sortBy) =>
   parseTop(await exec(getConn(connId).conn, TOP_CMD(sortBy === 'mem' ? 'mem' : 'cpu'))));
 
@@ -1500,6 +1521,7 @@ let pushTimer = null, applying = false;
 function schedulePush() {
   if (applying || !acct()?.uid) return;
   if (!acct().dirty) saveAcct({ dirty: true });
+  if (acct().autoOnChange === false) return; // "on every change" is off: the periodic backup or Backup now uploads it
   clearTimeout(pushTimer);
   pushTimer = setTimeout(() => pushNow().catch(e => console.warn(`Google sync: ${e.message}`)), 4000);
 }
@@ -1519,15 +1541,15 @@ async function pushNow() {
 }
 const hasLocalData = () => personalServers().length > 0 || deployments().length > 0 || users().length > 0;
 // Returns true when the cloud copy was applied (the window then reloads its lists).
-async function pullNow() {
+async function pullNow(force = false) {
   const a = acct();
   if (!a?.uid) return false;
   const found = await cloud.findBackup();
   if (!found) { saveAcct({ fileId: '' }); await pushNow(); return false; }  // first machine: upload
   if (found.id !== a.fileId) saveAcct({ fileId: found.id });
   const doc = { updatedAt: found.updatedAt };
-  if (doc.updatedAt <= (a.lastSyncAt || 0)) { if (a.dirty) await pushNow(); return false; } // nothing new
-  if (a.dirty || (!a.lastSyncAt && hasLocalData())) {                       // both sides changed: ask
+  if (!force && doc.updatedAt <= (a.lastSyncAt || 0)) { if (a.dirty) await pushNow(); return false; } // nothing new
+  if (!force && (a.dirty || (!a.lastSyncAt && hasLocalData()))) {           // both sides changed: ask
     const r = await dialog.showMessageBox(win && !win.isDestroyed() ? win : undefined, {
       message: `Your Google account (${a.email}) has a saved EranTerm configuration.`,
       detail: `Saved ${new Date(doc.updatedAt).toLocaleString()}. Use it on this computer, or replace it with this computer's servers, scripts and settings? Passwords and API keys stay on each computer either way.`,
@@ -1563,6 +1585,7 @@ function accountInfo() {
   const a = acct(), t = teamCache().team;
   return {
     configured: cloud.configured(), signedIn: !!a?.uid, email: a?.email || '', lastSyncAt: a?.lastSyncAt || 0, pending: !!a?.dirty,
+    backup: { onChange: a?.autoOnChange !== false, periodic: !!a?.periodic?.on, every: a?.periodic?.every === 'week' ? 'week' : 'day' },
     role: role(), team: t ? { owner: t.owner, admins: t.admins || [], members: t.members || [] } : null,
   };
 }
@@ -1586,6 +1609,28 @@ ipcMain.handle('account:signOut', async () => {
   return accountInfo();
 });
 ipcMain.handle('account:syncNow', async () => { if (acct()?.dirty) await pushNow(); return syncAll(); });
+// Backup now: upload this computer's configuration (replaces the Drive copy). Restore: replace this computer's with the Drive copy.
+ipcMain.handle('account:backupNow', async () => { if (!acct()?.uid) throw new Error('Sign in first.'); await pushNow(); return accountInfo(); });
+ipcMain.handle('account:restore', async () => {
+  if (!acct()?.uid) throw new Error('Sign in first.');
+  if (!await cloud.findBackup()) throw new Error('There is no backup in your Google Drive yet. Use Backup now first.');
+  await pullNow(true);
+  send('cloud:changed');
+  return accountInfo();
+});
+// Automatic backup: { onChange, periodic, every: 'day' | 'week' }
+ipcMain.handle('account:setBackup', (_e, b) => {
+  if (!acct()?.uid) throw new Error('Sign in first.');
+  saveAcct({ autoOnChange: !!b.onChange, periodic: { on: !!b.periodic, every: b.every === 'week' ? 'week' : 'day' } });
+  if (b.onChange && acct().dirty) schedulePush();
+  return accountInfo();
+});
+// Periodic backup: checked every 15 minutes; uploads when changes are waiting and the last backup is a day / week old.
+setInterval(() => {
+  const a = acct();
+  if (!a?.uid || !a.periodic?.on || !a.dirty) return;
+  if (Date.now() - (a.lastSyncAt || 0) >= (a.periodic.every === 'week' ? 7 : 1) * 864e5) pushNow().catch(e => console.warn(`Google backup: ${e.message}`));
+}, 15 * 60e3);
 
 // Team management (owner) and moving items between you and the team (admins).
 ipcMain.handle('team:create', () => { throw new Error(TEAM_LATER); });

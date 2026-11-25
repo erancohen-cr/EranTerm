@@ -23,7 +23,7 @@
         <button class="navitem active" id="navAll" title="All Servers"><i>▤</i><span class="lbl">All Servers</span><span class="count lbl" id="navCount"></span></button>
         <button class="navitem" id="navFav" title="Favorites"><i>☆</i><span class="lbl">Favorites</span><span class="count lbl" id="favCount"></span></button>
         <button class="navitem" id="navUsers" title="Users"><i>👤</i><span class="lbl">Users</span><span class="count lbl" id="userCount"></span></button>
-        <button class="navitem" id="navEnvs" title="Environments: manage environments, their groups and servers"><i>🌐</i><span class="lbl">Environments</span><span class="count lbl" id="envCount"></span></button>
+        <button class="navitem" id="navEnvs" data-feature="envs" title="Environments: manage environments, their groups and servers"><i>🌐</i><span class="lbl">Environments</span><span class="count lbl" id="envCount"></span></button>
         </div>
         <h6 class="lbl navsec" data-sec="tools">Tools</h6>
         <div class="navgrp" data-grp="tools">
@@ -148,7 +148,8 @@
   </div>
 
   <footer id="appFooter">
-    <button id="ftMenu" title="Close / open the left menu">☰ Menu</button>
+    <button id="ftMenu" class="ftbig" title="Close / open the left menu" aria-label="Menu">☰</button>
+    <button id="ftSettings" class="ftbig" title="Settings" aria-label="Settings">⚙</button>
     <span class="grow"></span>
     <span id="ftAcct" class="ftacct"></span>
   </footer>
@@ -289,6 +290,10 @@
             <span class="ttablist"></span>
             <button class="tnew icon" title="New session to this server">＋</button>
             <span class="grow"></span>
+            <span class="tcount muted"></span>
+            <span class="tstep"><button class="tprev" title="Previous match (Shift+Enter, ↑)" disabled>▲</button><button class="tnext" title="Next match (Enter, ↓)" disabled>▼</button></span>
+            <input class="tsearch" type="search" placeholder="Terminal Search" title="Search the terminal (Cmd/Ctrl+F). Enter = next, Shift+Enter = previous, Esc = clear">
+            <select class="tscope" title="Where to search"><option value="cur">Current Tab</option><option value="all">All Tabs</option></select>
             <button class="tscripts" title="Show scripts">{ } Scripts</button>
           </div>
           <div class="thosts"><p class="tempty empty" hidden>No open sessions. Click ＋ to start one.</p></div>
@@ -489,7 +494,7 @@
     <form method="dialog" id="groupForm">
       <h3 id="groupTitle"></h3>
       <label>Name <input name="name" required maxlength="100" autocomplete="off" placeholder="e.g. Production"></label>
-      <label>Color <span id="groupColors" class="swatches"></span></label>
+      <div class="cfield">Color <span id="groupColors"></span></div>
       <label>Environment <select name="env"></select></label>
       <p id="groupInfo" class="muted"></p>
       <menu><button value="delete" class="gdel danger-btn" formnovalidate>Delete</button><span class="grow"></span><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary">Save</button></menu>
@@ -507,7 +512,7 @@
       <section class="spane" data-pane="general">
         <label>Name <input name="name" maxlength="100" autocomplete="off"></label>
         <label>Description <textarea name="description" rows="2" maxlength="500" placeholder="What is this environment for? e.g. Production servers in EU"></textarea></label>
-        <label>Color <span id="envColors" class="swatches"></span></label>
+        <div class="cfield">Color <span id="envColors"></span></div>
         <p id="envShareInfo" class="muted"></p>
       </section>
       <section class="spane" data-pane="groups" hidden>
@@ -554,6 +559,7 @@
       <header class="dlghead"><b>EranTerm &nbsp;Settings</b><button value="cancel" formnovalidate class="icon" title="Close without saving">✕</button></header>
       <nav class="stabs">
         <button type="button" data-tab="general">General</button>
+        <button type="button" data-tab="appearance">Appearance</button>
         <button type="button" data-tab="account">Account</button>
         <button type="button" data-tab="team" hidden>Team</button>
         <button type="button" data-tab="avail">Server Availability</button>
@@ -561,6 +567,7 @@
         <button type="button" data-tab="logging">Logging</button>
         <button type="button" data-tab="ai">AI</button>
         <button type="button" data-tab="notify">Notifications</button>
+        <button type="button" data-tab="flags" id="flagsTab" hidden>Feature flags</button>
       </nav>
       <section class="spane" data-pane="general" hidden>
       <label>Theme
@@ -571,11 +578,43 @@
       </label>
       <label class="row"><input name="restoreTabs" type="checkbox"> Reopen the open server tabs when the app starts</label>
       </section>
+      <section class="spane appear" data-pane="appearance" hidden>
+      <h4>Terminal</h4>
+      <label class="row"><input name="termBgOn" type="checkbox"> Background <input name="termBg" type="color"></label>
+      <label class="row"><input name="termFgOn" type="checkbox"> Text color <input name="termFg" type="color"></label>
+      <label class="row">Font size <input name="termSize" type="number" min="8" max="32"> px</label>
+      <h4>Logs</h4>
+      <label class="row"><input name="logSame" type="checkbox"> Same as terminal</label>
+      <fieldset class="aplog">
+      <label class="row"><input name="logBgOn" type="checkbox"> Background <input name="logBg" type="color"></label>
+      <label class="row"><input name="logFgOn" type="checkbox"> Text color <input name="logFg" type="color"></label>
+      <label class="row">Font size <input name="logSize" type="number" min="8" max="32"> px</label>
+      </fieldset>
+      <p class="hint">Unticked colors follow the light / dark theme. Warning and error lines in Logs keep their own colors.</p>
+      <button type="button" id="appearReset" class="sm">Reset to defaults</button>
+      </section>
       <section class="spane" data-pane="account" hidden>
       <div id="acctBox"></div>
-      <p class="hint">Signed in, your servers, saved users, groups, scripts, deployments and settings are backed up to your own Google Drive
-        (a hidden app folder, not shown with your Drive files) and come back on any computer where you sign in with the same account.
-        Passwords, SSH keys and AI API keys never leave this computer.</p>
+      <div class="acctHelp">
+        <h4>What signing in does</h4>
+        <ul>
+          <li>Backs up your configuration to your own Google Drive, in a hidden app folder that is not shown with your Drive files.</li>
+          <li>Restores it on any computer where you sign in with the same account.</li>
+          <li>Is optional: without it, EranTerm works fully on this computer.</li>
+        </ul>
+        <h4>What is backed up</h4>
+        <ul>
+          <li>Servers, saved users, groups and environments</li>
+          <li>Scripts, variables and deployments</li>
+          <li>Settings</li>
+        </ul>
+        <h4>What never leaves this computer</h4>
+        <ul>
+          <li>Passwords and SSH keys</li>
+          <li>AI API keys</li>
+          <li>Logs, the Action Log and host keys</li>
+        </ul>
+      </div>
       </section>
       <section class="spane" data-pane="team" hidden>
       <div id="teamBox"></div>
@@ -618,6 +657,10 @@
       <section class="spane" data-pane="notify" hidden>
       <label class="row"><input name="notify" type="checkbox"> Show desktop notifications</label>
       <p class="hint">Native OS popups: server down / back up, deployment finished, metric alerts.</p>
+      </section>
+      <section class="spane" data-pane="flags" hidden>
+      <p class="hint">Hide features that are still being built. Changes apply right away.</p>
+      <div id="flagsList"></div>
       </section>
       <p id="aiMsg" class="hint"></p>
       <menu><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary">Save</button></menu>

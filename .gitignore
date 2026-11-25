@@ -6,3 +6,5 @@ dist/
 *.exe
 *.zip
 *.blockmap
+client_secret_*.json
+google-oauth.json
