@@ -1704,6 +1704,43 @@ function closeServer(serverId) {
   show('home');
 }
 
+// Right-click on a server tab.
+function serverDetails(s) {
+  const a = avail[s.id], e = envById(envOfServer(s));
+  const rows = [['Name', s.name], ['Host', s.host], ['User', s.username], ['Port', s.port], ['Type', !s.local && typeOf(s).toUpperCase()],
+    ['Group', s.group], ['Environment', e && `${envIcon(e)} ${e.name}`], ['Tags', s.tags?.join(', ')], ['OS', s.os], ['Details', s.details],
+    ['Reachable', a && `${a.server === 'up' ? 'yes' : 'no'} · checked ${new Date(a.at).toLocaleString()}`]].filter(r => r[1]);
+  ask({ title: s.name, ok: 'Close', body: el('table', { className: 'kv' },
+    ...rows.map(([k, val]) => el('tr', {}, el('td', { className: 'muted', textContent: k }), el('td', { className: 'mono', textContent: String(val) })))) });
+}
+async function tabMenu(sid) {
+  const v = views.get(sid), s = servers.find(x => x.id === sid) || v.server;
+  const ids = tabIds(), i = ids.indexOf(sid), failed = [...views.values()].filter(x => x.failed).length;
+  const pick = await api.menu([
+    { id: 'details', label: 'Get server details' },
+    { id: 'edit', label: 'Edit Server', enabled: !s.local },
+    { sep: true },
+    { id: 'reconnect', label: 'Reconnect', enabled: !v.connId || v.failed },
+    { id: 'failed', label: `Reconnect failed${failed ? ` (${failed})` : ''}`, enabled: !!failed },
+    { sep: true },
+    { id: 'close', label: `Close ${s.name}` },
+    { id: 'all', label: 'Close all' },
+    { id: 'others', label: 'Close other tabs', enabled: ids.length > 1 },
+    { id: 'right', label: 'Close tabs to the right', enabled: i < ids.length - 1 },
+  ]);
+  const closeMany = list => { const cur = shownId; list.forEach(closeServer); if (views.has(cur)) show(cur); };
+  ({
+    details: () => serverDetails(s),
+    edit: () => editServer(s),
+    reconnect: () => reconnect(sid),
+    failed: () => $('#reconnAll').click(),
+    close: () => closeServer(sid),
+    all: () => closeMany(ids),
+    others: () => closeMany(ids.filter(x => x !== sid)),
+    right: () => closeMany(ids.slice(i + 1)),
+  })[pick]?.();
+}
+
 async function openServer(s) {
   if (views.has(s.id)) return show(s.id);
 
@@ -1716,6 +1753,7 @@ async function openServer(s) {
   $('#tabs .tabtools').before(tabEl);
 
   tabEl.dataset.sid = s.id;
+  tabEl.oncontextmenu = e => { e.preventDefault(); tabMenu(s.id); };
   const v = { root, tabEl, connId: null, panel: 'files', server: s, failed: false };
   views.set(s.id, v);
   saveTabs();

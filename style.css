@@ -891,3 +891,4 @@ body.folded .navgrp.closed { display: flex; } /* icon-only menu keeps every icon
 #usersView .pagehead button, #usersView .pagehead select, #usersView .pagehead input { height: 32px; box-sizing: border-box; white-space: nowrap; }
 #serversView .pagehead input.search { flex: 1 1 220px; min-width: 180px; }
 #serversView .pagehead .grow, #usersView .pagehead .grow { flex: 1 1 0; }
+.kv td { padding: 3px 12px 3px 0; vertical-align: top; } /* server details (tab right-click) */
