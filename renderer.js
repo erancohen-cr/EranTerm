@@ -116,14 +116,60 @@ function show(id) {
   else views.get(id)?.onShow();
 }
 $('#homeTab').onclick = () => show('home');
-// Cmd+F (Mac) / Ctrl+F: jump to the Terminal Search box while a server's Terminal panel is showing
-// (capture phase, so xterm doesn't also send ^F to the shell).
-document.addEventListener('keydown', e => {
-  if (e.key.toLowerCase() !== 'f' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+api.hist.onRequest((sid, op) => views.get(sid)?.histOp?.(op)); // History page asked to dock / undock / close
+
+// ================= keyboard shortcuts (Settings → Keyboard) =================
+// Combos are strings like "Ctrl+Shift+Tab"; "#" in goTab stands for any digit 1-9. Overrides live in localStorage.
+const IS_MAC = /Mac/i.test(navigator.platform);
+const SHORTCUTS = [
+  { id: 'find', label: 'Search in the terminal', def: IS_MAC ? 'Cmd+F' : 'Ctrl+F' },
+  { id: 'nextTab', label: 'Next tab', note: 'Terminal sessions when a terminal has focus, otherwise the server tabs', def: 'Ctrl+Tab' },
+  { id: 'prevTab', label: 'Previous tab', note: 'Same rule as Next tab', def: 'Ctrl+Shift+Tab' },
+  { id: 'goTab', label: 'Go to tab number', note: 'Tab 1 is the left-most; a number past the last tab goes to the last one', def: IS_MAC ? 'Cmd+#' : 'Alt+#', digit: true },
+];
+const scSaved = () => { try { return JSON.parse(localStorage.getItem('shortcuts')) || {}; } catch { return {}; } };
+const scCombo = id => scSaved()[id] || SHORTCUTS.find(x => x.id === id).def;
+function scSet(id, combo) {
+  const m = scSaved();
+  if (combo && combo !== SHORTCUTS.find(x => x.id === id).def) m[id] = combo; else delete m[id];
+  try { localStorage.setItem('shortcuts', JSON.stringify(m)); } catch { /* not remembered */ }
+}
+// "Ctrl+Shift+Tab" for a keydown ('' for a lone modifier). Letters/digits come from e.code so Alt/Option doesn't change them.
+function comboOf(e) {
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return '';
+  const k = /^Key./.test(e.code) ? e.code.slice(3) : /^Digit./.test(e.code) ? e.code.slice(5) : e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+  return [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Cmd', k].filter(Boolean).join('+');
+}
+let scRecording = false; // Settings is capturing a new combo: don't run shortcuts meanwhile
+
+// Next / previous / numbered tab. Context follows focus: inside a server's Terminal panel it moves between
+// terminal sessions, anywhere else between the top tabs (Home, then servers, left to right).
+let topNav = false; // tab shortcuts last moved the server tabs: stay on them even though arriving on a server focuses its terminal
+function goTab(step, n) {
   const v = views.get(shownId);
-  if (!v?.focusSearch || v.root.querySelector('.panel.term')?.hidden !== false) return;
-  e.preventDefault(); e.stopPropagation();
-  v.focusSearch();
+  const inTerm = !topNav && v?.sess && document.activeElement?.closest('.panel.term') && v.sess.list().length > 0;
+  const items = inTerm ? v.sess.list() : [...document.querySelectorAll('#tabs > .tab')];
+  const at = inTerm ? items.indexOf(v.sess.cur()) : items.findIndex(t => t.classList.contains('active'));
+  const to = n ? Math.min(n, items.length) - 1 : (at + step + items.length) % items.length;
+  if (!items[to] || to === at) return;
+  if (inTerm) v.sess.go(items[to]); else { topNav = true; items[to].click(); }
+}
+document.addEventListener('mousedown', e => { if (e.target.closest?.('.panel.term')) topNav = false; }, true); // clicking into a terminal
+document.addEventListener('keydown', e => {
+  if (scRecording || e.isComposing) return;
+  const c = comboOf(e);
+  if (!c) return;
+  const hit = id => scCombo(id) === c;
+  const num = /^\d$/.test(c.slice(-1)) && c.slice(-1) !== '0' ? scCombo('goTab') === c.slice(0, -1) + '#' : false;
+  if (hit('find')) {
+    const v = views.get(shownId);
+    if (!v?.focusSearch || v.root.querySelector('.panel.term')?.hidden !== false) return;
+    v.focusSearch();
+  } else if (hit('nextTab')) goTab(1);
+  else if (hit('prevTab')) goTab(-1);
+  else if (num) goTab(0, Number(c.slice(-1)));
+  else { if (e.target.closest?.('.panel.term')) topNav = false; return; } // typing in a terminal: session tabs again
+  e.preventDefault(); e.stopPropagation(); // also keeps xterm from sending the keys to the shell
 }, true);
 
 // Server tab + page header follow the server's group (name chip, gentle color). Re-run when groups change.
@@ -163,6 +209,8 @@ dragReorder($('#tabs'), '.tab[data-sid]', () => saveTabs());
 // Open server tabs (in tab order) are remembered; Settings → General → reopen them at startup.
 const tabIds = () => [...$('#tabs').querySelectorAll('.tab[data-sid]')].map(t => t.dataset.sid);
 const saveTabs = () => { try { localStorage.setItem('openTabs', JSON.stringify(tabIds())); } catch { /* not remembered */ } };
+// File Manager: open folders / download files with one click (default) or a double click. Settings → General.
+const fmSingleClick = () => { try { return localStorage.getItem('fmClick') !== 'double'; } catch { return true; } };
 const restoreTabsOn = () => { try { return localStorage.getItem('restoreTabs') === 'on'; } catch { return false; } };
 
 // "+" opens a terminal on this computer as a server tab (Terminal only: no SSH, so no files/logs/metrics).
@@ -171,12 +219,14 @@ const LOCAL_SERVER = { id: LOCAL, name: 'localhost', host: 'localhost', local: t
 $('#localTab').onclick = () => openServer(LOCAL_SERVER);
 
 // Tabs whose connection failed or dropped; one button reconnects them all.
+// Only the tabs of the selected environment count (everything with "All environments").
+const failedViews = () => [...views].filter(([sid, v]) => v.failed && inEnv(servers.find(x => x.id === sid) || v.server));
 function paintReconnect() {
-  const n = [...views.values()].filter(v => v.failed).length;
+  const n = failedViews().length;
   $('#reconnAll').hidden = !n;
   $('#reconnAll').textContent = `⟳ Reconnect failed (${n})`;
 }
-$('#reconnAll').onclick = () => { for (const [sid, v] of views) if (v.failed) reconnect(sid); };
+$('#reconnAll').onclick = () => { for (const [sid] of failedViews()) reconnect(sid); };
 // Fresh page in the same tab position; the tab on screen stays on screen.
 function reconnect(sid) {
   const v = views.get(sid);
@@ -194,6 +244,7 @@ function reconnect(sid) {
 
 // ================= home: servers, groups, users =================
 let servers = [], users = [], savedGroups = [], groupColors = {};
+let muted = new Set(); // ids of servers whose notifications are muted
 let homeMode = 'all'; // 'all' | 'fav' | 'users' | 'group:<name>'
 const UNGROUPED = 'Ungrouped';
 const groupOf = s => s.group || UNGROUPED;
@@ -217,13 +268,16 @@ const envVarsFor = sid => { const e = runEnv(sid); return e ? { ...e.vars, ENV: 
 const envByKey = () => Object.fromEntries(envs.list.map(e => [e.key, e.vars || {}]));
 
 async function refreshServers() {
-  [servers, users, savedGroups, groupColors, envs] = await Promise.all([api.servers.list(), api.users.list(), api.groups.list(), api.groups.colors(), api.envs.list()]);
+  let mutedList;
+  [servers, users, savedGroups, groupColors, envs, mutedList] = await Promise.all([api.servers.list(), api.users.list(), api.groups.list(), api.groups.colors(), api.envs.list(), api.mute.list()]);
+  muted = new Set(mutedList);
   if (curEnv !== 'all' && !envById(curEnv)) curEnv = 'all';
   renderEnvSel();
   renderNav();
   paintTabs();
   renderServers();
   renderUsers();
+  paintReconnect();
 }
 
 // Groups of the selected environment (all of them with "All environments").
@@ -233,6 +287,97 @@ function groupNames() {
   return servers.some(s => !s.group && inEnv(s)) ? [...named, UNGROUPED] : named;
 }
 
+// Side menu "All Servers": a tree of groups -> servers (Settings → General can switch it back to one item). Folded by default.
+const navTreeOn = () => { try { return localStorage.getItem('navMode') !== 'flat'; } catch { return true; } };
+const navBgOn = () => { try { return localStorage.getItem('navBg') !== 'off'; } catch { return true; } }; // tree: server click stays on this page
+let navOpen = false;
+const navOpenGroups = new Set();
+// Tree click on a server: open its tab but stay on the page we are on (the tree keeps the focus).
+function openInBackground(s) {
+  if (!navBgOn()) return openServer(s);
+  if (views.has(s.id)) return toast(`${s.name} is already open`);
+  const cur = shownId;
+  openServer(s); // shows the new page synchronously, then connects
+  show(cur);
+}
+// Group clicked in the tree: All Servers page with only that group expanded.
+function openGroupInAll(name) {
+  collapsed = new Set(groupNames().filter(x => x !== name));
+  saveCollapsed();
+  homeMode = 'all';
+  renderNav(); renderServers();
+  $('.content').scrollTop = 0;
+}
+function renderNavTree() {
+  const on = navTreeOn();
+  $('#navCaret').hidden = !on;
+  $('#navCaret').textContent = navOpen ? '▾' : '▸';
+  $('#navTree').hidden = !on || !navOpen;
+  if (!on || !navOpen) return $('#navTree').replaceChildren();
+  const caret = open => el('span', { className: 'tcaret', textContent: open ? '▾' : '▸' });
+  $('#navTree').replaceChildren(...groupNames().flatMap(name => {
+    const members = servers.filter(s => groupOf(s) === name && inEnv(s)).sort((a, b) => a.name.localeCompare(b.name));
+    const open = navOpenGroups.has(name);
+    const caretEl = caret(open);
+    caretEl.onclick = e => { e.stopPropagation(); navOpenGroups[open ? 'delete' : 'add'](name); renderNavTree(); };
+    const row = tintGroup(el('button', { className: 'navitem tgrp', title: `Open group ${name}`, onclick: () => openGroupInAll(name),
+      oncontextmenu: e => { e.preventDefault(); navGroupMenu(name, members); } },
+      caretEl, el('span', { className: 'lbl', textContent: name }), el('span', { className: 'count lbl', textContent: members.length }),
+      muteBtn(idsOfGroup(name), `all servers in ${name}`, 'span', 'sm')), name === UNGROUPED ? '' : name);
+    return [row, ...(open ? members.map(s => el('button', { className: 'navitem tsrv', title: `Click: connect in the background · Double click: open and focus (${s.host})`, onclick: e => { if (e.detail < 2) openInBackground(s); }, ondblclick: () => openServer(s), oncontextmenu: e => { e.preventDefault(); navServerMenu(s); } }, // double click: open (or just switch to it) and focus
+      avMark(s.id, 'server'), el('span', { className: 'lbl', textContent: s.name }), muteBtn([s.id], s.name, 'span', 'sm'))) : [])];
+  }));
+  paintAvail();
+}
+// Right-click in the tree: a server or a group.
+async function navServerMenu(s) {
+  const rdp = typeOf(s) === 'rdp';
+  ({
+    connect: () => openServer(s),
+    bg: () => openInBackground(s),
+    details: () => serverDetails(s),
+    info: () => showServerInfo(s),
+    mute: () => setMute([s.id], !isMuted(s.id)),
+    edit: () => editServer(s),
+    star: () => toggleStar(s),
+    desktop: () => (rdp ? openRdp(s) : openDesktop(s)),
+    delete: () => deleteServer(s),
+  })[await api.menu([
+    { id: 'connect', label: views.has(s.id) ? 'Open' : 'Connect' },
+    { id: 'bg', label: 'Open in background', enabled: !views.has(s.id) },
+    { sep: true },
+    { id: 'details', label: 'Get server details' },
+    { id: 'info', label: 'Server info' },
+    { id: 'mute', label: isMuted(s.id) ? 'Unmute notifications' : 'Mute notifications' },
+    { id: 'edit', label: 'Edit Server' },
+    { id: 'star', label: s.starred ? 'Unfavorite' : 'Favorite' },
+    { id: 'desktop', label: rdp ? 'Open Remote Desktop' : 'Open desktop' },
+    ...(canEdit(s) ? [{ sep: true }, { id: 'delete', label: 'Delete…' }] : []),
+  ])]?.();
+}
+async function navGroupMenu(name, members, inTable = false) {
+  const open = navOpenGroups.has(name), closed = members.filter(s => !views.has(s.id));
+  const ids = idsOfGroup(name), gm = allMuted(ids);
+  const connectAll = async () => {
+    if (closed.length > 5 && !(await ask({ title: `Connect ${closed.length} servers?`, body: `Opens a tab for every server in ${name}.`, ok: 'Connect all' }))) return;
+    closed.forEach(openInBackground);
+  };
+  ({
+    open: () => openGroupInAll(name),
+    mute: () => setMute(ids, !gm),
+    fold: () => { navOpenGroups[open ? 'delete' : 'add'](name); renderNavTree(); },
+    connectAll,
+    add: () => editServer({ group: name === UNGROUPED ? '' : name }),
+    edit: () => editGroup(name),
+  })[await api.menu([
+    ...(inTable ? [] : [{ id: 'open', label: 'Open group' }, { id: 'fold', label: open ? 'Collapse' : 'Expand' }, { sep: true }]),
+    { id: 'mute', label: gm ? `Unmute all servers in ${name}` : `Mute all servers in ${name}`, enabled: ids.length > 0 },
+    { id: 'connectAll', label: `Connect all${closed.length ? ` (${closed.length})` : ''}`, enabled: !!closed.length },
+    { id: 'add', label: 'Add server to group…' },
+    ...(name === UNGROUPED ? [] : [{ id: 'edit', label: 'Edit group…' }]),
+  ])]?.();
+}
+$('#navCaret').onclick = e => { e.stopPropagation(); navOpen = !navOpen; renderNavTree(); };
 function setMode(mode) {
   homeMode = mode;
   const g = modeGroup();
@@ -259,12 +404,14 @@ function renderNav() {
   el('span', { className: 'lbl', textContent: name }),
   el('span', { className: 'count lbl', textContent: servers.filter(s => groupOf(s) === name && inEnv(s)).length }),
   ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name), 'icon gedit lbl')])), name === UNGROUPED ? '' : name)));
+  renderNavTree();
   $('#navEnvs').classList.toggle('active', homeMode === 'envs');
   $('#envCount').textContent = envs.list.length || '';
   $('#envsView').hidden = homeMode !== 'envs';
   if (homeMode === 'envs') renderEnvPage();
   $('#serversView').hidden = ['users', 'deploy', 'scripts', 'bcast', 'envs'].includes(homeMode);
   $('#usersView').hidden = homeMode !== 'users';
+  paintSrvPanel(); // the details panel belongs to the All Servers / Favorites / group pages only
   $('#deployView').hidden = homeMode !== 'deploy';
   $('#scriptsView').hidden = homeMode !== 'scripts';
   $('#bcastView').hidden = homeMode !== 'bcast';
@@ -365,27 +512,108 @@ function onAvail(next) {
     const was = avail[id]?.server;
     if (!was || was === a.server) continue; // first check or no change: stay quiet
     const s = servers.find(x => x.id === id);
-    if (s) notify(a.server === 'up' ? `✅ ${s.name} is back up` : `⛔ ${s.name} is not responding`, s.host);
+    if (s && !isMuted(s.id)) notify(a.server === 'up' ? `✅ ${s.name} is back up` : `⛔ ${s.name} is not responding`, s.host);
   }
   avail = next;
-  paintAvail();
+  if ($('#availFilter').value !== 'all') renderServers(); // the filtered list may have changed
+  else paintAvail();
 }
 api.avail.onUpdate(onAvail);
-api.avail.get().then(a => { avail = a; paintAvail(); });
+api.avail.get().then(a => { avail = a; $('#availFilter').value === 'all' ? paintAvail() : renderServers(); });
 
+// OS tag comes from the detected OS (refreshed every connect), not stored in s.tags, so it never goes stale.
+const OS_TAG = { linux: "Linux", windows: "Windows", macos: "Mac" };
+const tagsOf = s => { const t = OS_TAG[s.os], own = s.tags || []; return t && !own.includes(t) ? [...own, t] : own; };
+
+// ---- mute notifications: per server, and in bulk per group / environment (the bulk action sets every member) ----
+const isMuted = id => muted.has(id);
+const speakerSvg = off => `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4z" fill="currentColor" fill-opacity=".25"/>${off ? '<path d="M3 3l18 18"/>' : '<path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/>'}</svg>`; // static markup (Feather-style speaker)
+const idsOfGroup = name => servers.filter(s => groupOf(s) === name).map(s => s.id);
+const idsOfEnv = id => servers.filter(s => envOfServer(s) === id).map(s => s.id);
+const allMuted = ids => ids.length > 0 && ids.every(isMuted);
+function paintMuteBtn(b, on, what) {
+  b.innerHTML = speakerSvg(on);
+  b.classList.toggle('muted', on);
+  b.title = on ? `Notifications muted for ${what}. Click to unmute` : `Mute notifications for ${what}`;
+  b.setAttribute('aria-pressed', String(on));
+}
+async function setMute(ids, on) {
+  try { muted = new Set(await api.mute.set(ids, on)); } catch (e) { return toast(cleanErr(e), true); }
+  repaintMute();
+}
+function muteBtn(ids, what, tag = 'button', extra = '') { // tag 'span' inside other buttons (a button can't hold a button)
+  const b = el(tag, tag === 'button' ? { type: 'button', className: 'icon mutebtn ' + extra } : { className: 'mutebtn ' + extra, role: 'button' });
+  paintMuteBtn(b, allMuted(ids), what);
+  b.onclick = ev => { ev.stopPropagation(); setMute(ids, !allMuted(ids)); };
+  return b;
+}
+function repaintMute() {
+  renderServers(); renderNavTree();
+  if (homeMode === 'envs') renderEnvPage();
+  for (const v of views.values()) v.paintMute?.();
+}
+// Opens (or switches to) the server tab with its Info window showing.
+function showServerInfo(s, tab = 'info') {
+  openServer(s);
+  views.get(s.id)?.openInfo?.(tab);
+}
+// Label / value rows and a titled card, shared by the server Info windows.
+const dField = (k, v) => (v || v === 0 ? el('div', { className: 'dfield' }, el('span', { className: 'dk', textContent: k }), el('span', { className: 'dv mono', textContent: String(v) })) : null);
+const dSec = (title, ...items) => el('section', { className: 'dsec' }, el('h6', { textContent: title }), ...items.filter(Boolean));
+
+// All Servers: click a row = select it and show its details on the right; click again = close; double click = connect.
+let selSrv = null; // id of the selected server
+function paintSelection() {
+  for (const tr of document.querySelectorAll('#serverRows tr.srow')) tr.classList.toggle('sel', tr.dataset.sid === selSrv);
+}
+async function paintSrvPanel() {
+  const box = $('#srvPanel'), id = selSrv;
+  if (id && !servers.some(x => x.id === id)) selSrv = null; // deleted meanwhile
+  box.hidden = !selSrv || $('#serversView').hidden;
+  paintSelection();
+  if (box.hidden) return;
+  const { s, table } = await detailsTable(servers.find(x => x.id === selSrv));
+  if (selSrv !== s.id) return; // another row was picked while loading
+  box.replaceChildren(
+    el('div', { className: 'sphead' }, el('b', { textContent: s.name, title: s.name }), el('span', { className: 'grow' }),
+      iconBtn('×', 'Close details', () => { selSrv = null; paintSrvPanel(); })),
+    table,
+    el('div', { className: 'spacts' },
+      el('button', { type: 'button', className: 'sm primary', textContent: '▶ Connect', onclick: () => openInBackground(s) }),
+      el('button', { type: 'button', className: 'sm', textContent: '✎ Edit', onclick: () => editServer(s) })));
+}
+// Drag the panel's left edge to resize it (width remembered).
+{
+  const box = $('#srvPanel');
+  try { const w = Number(localStorage.getItem('srvPanelW')); if (w) box.style.width = `${w}px`; } catch { /* default */ }
+  box.addEventListener('mousedown', e => {
+    if (e.target !== box || e.clientX - box.getBoundingClientRect().left > 7) return;
+    e.preventDefault();
+    const right = box.getBoundingClientRect().right;
+    const move = ev => { box.style.width = `${Math.min(720, Math.max(260, right - ev.clientX))}px`; };
+    const up = () => {
+      document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); document.body.classList.remove('resizing');
+      try { localStorage.setItem('srvPanelW', parseInt(box.style.width, 10)); } catch { /* not remembered */ }
+    };
+    document.body.classList.add('resizing');
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+  });
+}
+let clickTimer = 0;
 function serverRow(s) {
-  const tr = el('tr', { className: 'srow' + (alertState.get(s.id)?.size ? ' alerting' : '') },
+  const tr = el('tr', { className: 'srow' + (alertState.get(s.id)?.size ? ' alerting' : '') + (selSrv === s.id ? ' sel' : '') },
     el('td', { className: 'state' }, avMark(s.id, 'server')),
-    el('td', {}, el('b', { textContent: s.name }), teamBadge(s)),
+    el('td', {}, el('b', { textContent: s.name, title: s.osInfo || '' }), teamBadge(s)),
     el('td', {}, el('span', { className: 'proto ' + typeOf(s), textContent: typeOf(s).toUpperCase() })),
     el('td', { className: 'mono', title: s.userLabel ? `Login: saved user "${s.userLabel}"` : '' },
       `${s.username ? s.username + '@' : ''}${s.host}` + (s.port !== defaultPort(s) ? `:${s.port}` : ''),
       s.userLabel ? el('span', { className: 'ulink', textContent: ' 👤' }) : null),
-    el('td', {}, ...s.tags.map(t => el('span', { className: 'tag', textContent: t }))),
+    el('td', {}, ...tagsOf(s).map(t => el('span', { className: 'tag', textContent: t }))),
     el('td', { className: 'details muted', textContent: s.details || '', title: s.details || '' }),
     alertCell(s),
     el('td', { className: 'muted', textContent: ago(s.lastSeen) }),
     el('td', { className: 'r actions' },
+      muteBtn([s.id], s.name),
       iconBtn(s.starred ? '★' : '☆', s.starred ? 'Unfavorite' : 'Favorite', () => toggleStar(s), 'icon' + (s.starred ? ' star' : '')),
       iconBtn('✎', canEdit(s) ? 'Edit' : 'Your login for this team server', () => editServer(s)),
       ...teamBtns('server', s, refreshServers),
@@ -395,10 +623,29 @@ function serverRow(s) {
         : iconBtn(...(DESKTOP[s.os] || DESKTOP['']), () => openDesktop(s), 'desk'), s.id, 'desk'),
       withAv(iconBtn(views.has(s.id) ? '↗ Open' : '▶ SSH',
         typeOf(s) === 'rdp' ? `Open SSH (Windows OpenSSH, port ${s.sshPort || 22}) with the same login` : 'Connect', () => connectServer(s), 'primary conn'), s.id, 'ssh')));
-  tr.ondblclick = () => connectServer(s);
+  tr.dataset.sid = s.id;
+  tr.oncontextmenu = e => { e.preventDefault(); navServerMenu(s); };
+  tr.onclick = e => {
+    if (e.target.closest('button, a') || e.detail > 1) return; // action buttons keep their own meaning
+    clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => { selSrv = selSrv === s.id ? null : s.id; paintSrvPanel(); }, 220); // a double click cancels this
+  };
+  tr.ondblclick = e => {
+    if (e.target.closest('button, a')) return;
+    clearTimeout(clickTimer);
+    if (views.has(s.id)) show(s.id); // already open: just switch to its tab
+    else openInBackground(s);
+  };
   return tr;
 }
 
+// Availability filter (State column): all / up / down / not checked yet.
+const availOk = s => {
+  const f = $('#availFilter').value;
+  if (f === 'all') return true;
+  const st = avail[s.id]?.server;
+  return f === 'up' ? st === 'up' : f === 'down' ? st && st !== 'up' : !st;
+};
 function renderServers() {
   const q = $('#filter').value.toLowerCase();
   const g = modeGroup();
@@ -406,7 +653,8 @@ function renderServers() {
     .filter(s => homeMode !== 'fav' || s.starred)
     .filter(inEnv)
     .filter(s => !g || groupOf(s) === g)
-    .filter(s => !q || [s.name, s.host, s.username, s.group || '', s.details || '', ...s.tags].some(x => x.toLowerCase().includes(q)))
+    .filter(s => availOk(s))
+    .filter(s => !q || [s.name, s.host, s.username, s.group || '', s.details || '', ...tagsOf(s)].some(x => x.toLowerCase().includes(q)))
     .sort((a, b) => b.starred - a.starred || a.name.localeCompare(b.name));
   $('#countBadge').textContent = `${list.length} server${list.length === 1 ? '' : 's'}`;
   $('#homeTitle').textContent = g || (homeMode === 'fav' ? 'Favorites' : curEnv === 'all' ? 'All Servers' : envById(curEnv)?.name || 'All Servers');
@@ -416,7 +664,7 @@ function renderServers() {
     if (!members.length && (q || homeMode === 'fav')) continue; // empty groups show only when not filtering
     const shut = !q && collapsed.has(name); // searching always shows matches
     rows.push(el('tr', {
-      className: 'grprow' + (shut ? ' shut' : ''),
+      className: 'grprow' + (shut ? ' shut' : ''), oncontextmenu: e => { e.preventDefault(); navGroupMenu(name, members, true); },
       onclick: () => { collapsed[collapsed.has(name) ? 'delete' : 'add'](name); saveCollapsed(); renderServers(); },
     }, el('td', { colSpan: 9 },
       el('span', { className: 'caret', textContent: shut ? '▸' : '▾' }),
@@ -425,6 +673,7 @@ function renderServers() {
       ...(curEnv === 'all' && name !== UNGROUPED ? [el('small', { className: 'muted', textContent: envById(envOfGroup(name))?.name })] : []),
       el('span', { className: 'count', textContent: members.length }),
       el('span', { className: 'grow' }),
+      muteBtn(idsOfGroup(name), `all servers in ${name}`, 'button', 'grpmute'),
       el('span', { className: 'gacts' },
         ...(name === UNGROUPED ? [] : [iconBtn('✎', `Edit group ${name}`, () => editGroup(name))]),
         iconBtn('＋', `Add a server to ${name}`, () => editServer({ group: name === UNGROUPED ? '' : name }))))));
@@ -433,6 +682,7 @@ function renderServers() {
   }
   $('#serverRows').replaceChildren(...rows);
   paintAvail();
+  paintSrvPanel();
   $('#emptyHome').hidden = servers.filter(inEnv).length > 0;
 }
 // ---- groups: new / rename / delete ----
@@ -562,6 +812,7 @@ function setEnv(id) {
   if (modeGroup() && !groupNames().includes(modeGroup())) homeMode = 'all';
   renderEnvSel();
   setMode(homeMode);
+  paintReconnect(); // the button follows the environment filter
 }
 $('#envSel').onchange = () => { if ($('#envSel').value === '+') { $('#envSel').value = curEnv; editEnv(null); } else setEnv($('#envSel').value); };
 $('#envEditBtn').onclick = () => editEnv(curEnv === 'all' ? 'local' : curEnv);
@@ -695,6 +946,10 @@ function editServer(s = {}) {
   f.elements.details.value = s.details || '';
   f.elements.starred.checked = !!s.starred;
   f.elements.probe.checked = !s.noProbe;
+  f.elements.muted.checked = !!s.id && isMuted(s.id);
+  f.elements.multi.checked = false;
+  $('#multiRow').hidden = !!s.id; // adding several is for new servers only
+  syncMulti();
   // Team server, not an admin: shared fields are read-only; the login fields stay editable (saved locally).
   const lock = !canEdit(s);
   $('#serverTeamNote').hidden = !lock;
@@ -714,6 +969,17 @@ function syncFormEnv() {
 }
 $('#serverForm').elements.group.addEventListener('input', syncFormEnv);
 $('#serverForm').elements.env.addEventListener('change', e => { e.target.dataset.pick = e.target.value; });
+// 'Add several servers': a list of IPs replaces Name + Host; names follow the chosen scheme.
+function syncMulti() {
+  const f = $('#serverForm'), on = f.elements.multi.checked;
+  f.querySelectorAll('.single-only').forEach(x => (x.hidden = on));
+  f.querySelectorAll('.multi-only').forEach(x => (x.hidden = !on));
+  f.querySelector('.name-prefix').hidden = !on || f.elements.nameMode.value !== 'prefix';
+  f.elements.host.required = !on;
+  f.elements.hosts.required = on;
+}
+$('#serverForm').elements.multi.onchange = syncMulti;
+$('#serverForm').elements.nameMode.onchange = syncMulti;
 // Show only the fields that apply; swap the default port when the type changes.
 function syncFormType() {
   const f = $('#serverForm');
@@ -741,14 +1007,30 @@ $('#serverForm').elements.username.onchange = () => {
 $('#serverDlg').addEventListener('close', async () => {
   if ($('#serverDlg').returnValue !== 'save') return;
   const e = $('#serverForm').elements;
+  const base = () => ({
+    type: e.type.value, domain: e.domain.value.trim(), sshPort: e.sshPort.value,
+    port: e.port.value, group: e.group.value, env: e.env.value, userId: e.userId.value,
+    username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
+    tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
+    details: e.details.value, noProbe: !e.probe.checked,
+  });
   try {
-    await api.servers.save({
-      id: e.id.value || undefined, type: e.type.value, domain: e.domain.value.trim(), sshPort: e.sshPort.value,
-      name: e.name.value, host: e.host.value, port: e.port.value, group: e.group.value, env: e.env.value, userId: e.userId.value,
-      username: e.username.value, keyPath: e.keyPath.value.trim(), password: e.userId.value ? '' : e.password.value,
-      tags: e.tags.value.split(',').map(t => t.trim()).filter(Boolean), starred: e.starred.checked,
-      details: e.details.value, noProbe: !e.probe.checked,
-    });
+    if (e.multi.checked && !e.id.value) {
+      const hosts = [...new Set(e.hosts.value.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean))].slice(0, 200);
+      const mode = e.nameMode.value, prefix = e.namePrefix.value.trim() || 'server_';
+      const ids = [];
+      for (const [i, host] of hosts.entries()) {
+        const saved = await api.servers.save({ ...base(), host,
+          name: mode === 'prefix' ? `${prefix}${i + 1}` : host, // 'inherit': the IP until the hostname is known
+          autoName: mode === 'inherit' });
+        if (saved?.id) ids.push(saved.id);
+      }
+      if (e.muted.checked && ids.length) await setMute(ids, true);
+      toast(`Added ${ids.length} server${ids.length === 1 ? '' : 's'}`);
+    } else {
+      const saved = await api.servers.save({ ...base(), id: e.id.value || undefined, name: e.name.value, host: e.host.value });
+      if (saved?.id && e.muted.checked !== isMuted(saved.id)) await setMute([saved.id], e.muted.checked);
+    }
   } catch (err) { toast(`Save failed: ${cleanErr(err)}`, true); }
   refreshServers();
 });
@@ -762,6 +1044,25 @@ async function deleteServer(s) {
 
 $('#addBtn').onclick = () => editServer({ group: modeGroup() && modeGroup() !== UNGROUPED ? modeGroup() : '' }); // environment: the switcher's
 $('#filter').oninput = renderServers;
+$('#availFilter').onchange = renderServers;
+// Colored availability filter (a native <select> popup ignores option colors on macOS): the hidden select keeps the value.
+{
+  const sel = $('#availFilter');
+  const OPTS = [['all', 'All states', ''], ['up', 'Available', 'up'], ['down', 'Not available', 'down'], ['none', 'Not checked', 'none']];
+  const label = v => OPTS.find(o => o[0] === v);
+  const btn = el('button', { type: 'button', className: 'afbtn', title: 'Filter by availability (State column)' });
+  const menu = el('div', { className: 'afmenu', hidden: true });
+  const wrap = el('div', { className: 'afilter' }, btn, menu);
+  const item = (o, cls) => [el('span', { className: 'afdot ' + o[2] }), el('span', { className: 'aft ' + o[2], textContent: o[1] }), ...(cls ? [el('span', { className: 'afcar', textContent: '▾' })] : [])];
+  const paint = () => { btn.replaceChildren(...item(label(sel.value), true)); btn.className = 'afbtn ' + label(sel.value)[2]; };
+  menu.replaceChildren(...OPTS.map(o => el('button', { type: 'button', className: 'afopt', onclick: () => {
+    sel.value = o[0]; menu.hidden = true; paint(); sel.dispatchEvent(new Event('change'));
+  } }, ...item(o))));
+  btn.onclick = e => { e.stopPropagation(); menu.hidden = !menu.hidden; };
+  document.addEventListener('click', () => { menu.hidden = true; });
+  sel.before(wrap);
+  paint();
+}
 $('#navAll').onclick = () => setMode('all');
 $('#navFav').onclick = () => setMode('fav');
 $('#navUsers').onclick = () => setMode('users');
@@ -887,6 +1188,10 @@ async function openSettings(focusKey = false) {
   f.elements.notify.checked = notifyOn();
   f.elements.defaultPanel.value = defaultPanel();
   f.elements.restoreTabs.checked = restoreTabsOn();
+  f.elements.fmClick.value = fmSingleClick() ? 'single' : 'double';
+  f.elements.navMode.value = navTreeOn() ? 'tree' : 'flat';
+  f.elements.navBg.checked = navBgOn();
+  f.elements.navBg.disabled = !navTreeOn();
   fillAppear(f.elements, appear);
   $('#updHint').textContent = `You have version ${aiSettings.version}. Checks at startup and every 6 hours. Help → Check for Updates… checks now.`;
   f.elements.aiProvider.replaceChildren(...Object.entries(aiSettings.providers)
@@ -898,12 +1203,51 @@ async function openSettings(focusKey = false) {
   $('#settingsDlg').showModal();
   if (focusKey) f.elements.apiKey.focus();
 }
+// ---- Settings → Keyboard ----
+function renderKeys() {
+  const kbd = combo => el('span', { className: 'kbds' }, ...combo.split('+').map(k => el('kbd', { textContent: k === '#' ? '1–9' : k })));
+  $('#keysBox').replaceChildren(...SHORTCUTS.map(sc => {
+    const btn = el('button', { type: 'button', className: 'kbtn', title: 'Click, then press the new keys' }, kbd(scCombo(sc.id)));
+    btn.onclick = () => recordKey(sc, btn);
+    return el('div', { className: 'krow' },
+      el('div', { className: 'klabel' }, el('b', { textContent: sc.label }), sc.note ? el('small', { className: 'muted', textContent: sc.note }) : null),
+      btn,
+      el('button', { type: 'button', className: 'sm', textContent: 'Reset', title: `Back to ${sc.def}`, hidden: scCombo(sc.id) === sc.def, onclick: () => { scSet(sc.id, ''); renderKeys(); } }));
+  }));
+}
+function recordKey(sc, btn) {
+  const msg = t => { $('#keysMsg').textContent = t; };
+  btn.replaceChildren(el('span', { className: 'muted', textContent: 'Press the keys…' }));
+  scRecording = true;
+  const done = () => { scRecording = false; document.removeEventListener('keydown', onKey, true); renderKeys(); };
+  function onKey(e) {
+    e.preventDefault(); e.stopPropagation(); // Esc must not close the dialog while recording
+    if (e.key === 'Escape') return done();
+    let c = comboOf(e);
+    if (!c) return; // only a modifier so far
+    if (!(e.ctrlKey || e.altKey || e.metaKey)) return msg('Include Ctrl, Alt or Cmd, e.g. Ctrl+Tab.');
+    if (sc.digit) {
+      if (!/^\d$/.test(c.slice(-1)) || c.slice(-1) === '0') return msg('Press a modifier plus a number key (1–9), e.g. Cmd+1.');
+      c = c.slice(0, -1) + '#';
+    }
+    const clash = SHORTCUTS.find(o => o.id !== sc.id && scCombo(o.id) === c);
+    if (clash) return msg(`${c.replace('#', '1–9')} is already used by "${clash.label}".`);
+    scSet(sc.id, c);
+    msg('Saved.');
+    done();
+  }
+  document.addEventListener('keydown', onKey, true);
+}
+$('#keysReset').onclick = () => { try { localStorage.removeItem('shortcuts'); } catch { /* ignore */ } renderKeys(); };
+$('#settingsDlg').addEventListener('close', () => { scRecording = false; });
 function settingsTab(k) {
+  if (k === 'keys') renderKeys();
   for (const b of document.querySelectorAll('#settingsForm .stabs button')) b.classList.toggle('on', b.dataset.tab === k);
   for (const p of document.querySelectorAll('#settingsForm .spane')) p.hidden = p.dataset.pane !== k;
 }
 for (const b of document.querySelectorAll('#settingsForm .stabs button')) b.onclick = () => settingsTab(b.dataset.tab);
 $('#settingsForm').elements.aiProvider.onchange = e => showProvider(e.target.value);
+$('#settingsForm').elements.navMode.onchange = e => { $('#settingsForm').elements.navBg.disabled = e.target.value !== 'tree'; };
 $('#logPick').onclick = async () => {
   const dir = await api.settings.pickLogDir($('#settingsForm').elements.logDir.value);
   if (dir) $('#settingsForm').elements.logDir.value = dir;
@@ -913,7 +1257,11 @@ $('#logConsole').onclick = () => api.log.openConsole();
 $('#settingsBtn').onclick = () => openSettings();
 $('#ftSettings').onclick = () => openSettings();
 api.ui.onSettings(() => openSettings());
+api.ui.onServersChanged(() => refreshServers()); // e.g. a server took its hostname as its name
+// Log Console docked to an edge: the page leaves room for it.
+api.ui.onDock(d => { const s = document.documentElement.style; s.setProperty('--dock-r', `${d.r || 0}px`); s.setProperty('--dock-b', `${d.b || 0}px`); });
 $('#consoleBtn').onclick = () => api.log.openConsole();
+$('#ftConsole').onclick = () => api.log.openConsole();
 
 // ---- Settings → Account / Team (buttons act right away; they are not part of Save) ----
 async function acctAction(btn, fn, okMsg) {
@@ -1112,7 +1460,7 @@ $('#settingsForm').addEventListener('submit', async e => {
       await api.settings.setAvail({ on: f.availOn.checked, intervalSec: f.availSec.value });
     }
     if (f.notify.checked && Notification.permission === 'default') Notification.requestPermission();
-    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); localStorage.setItem('restoreTabs', f.restoreTabs.checked ? 'on' : 'off'); localStorage.setItem('appearance', JSON.stringify(readAppear(f))); } catch { /* ignore */ }
+    try { localStorage.setItem('theme', f.theme.value); localStorage.setItem('notify', f.notify.checked ? 'on' : 'off'); localStorage.setItem('defaultPanel', f.defaultPanel.value); localStorage.setItem('restoreTabs', f.restoreTabs.checked ? 'on' : 'off'); localStorage.setItem('fmClick', f.fmClick.value); localStorage.setItem('navMode', f.navMode.value); localStorage.setItem('navBg', f.navBg.checked ? 'on' : 'off'); renderNav(); localStorage.setItem('appearance', JSON.stringify(readAppear(f))); } catch { /* ignore */ }
     $('#settingsDlg').close('save');
     toast(`Settings saved. AI: ${aiSettings.providers[f.aiProvider.value].label}`);
   } catch (err) {
@@ -1650,7 +1998,7 @@ $('#bcastAll').onchange = e => { for (const p of bcast.panes) p.chk.checked = e.
 // Add server: a tree of groups (native <details>), filtered by every field; stays open to add several.
 function bcastOptions() {
   const f = $('#bcastQ').value.trim().toLowerCase();
-  const hit = s => !f || [s.name, s.host, s.username, s.group, s.details, s.port, ...(s.tags || [])].join(' ').toLowerCase().includes(f);
+  const hit = s => !f || [s.name, s.host, s.username, s.group, s.details, s.port, ...tagsOf(s)].join(' ').toLowerCase().includes(f);
   const tree = groupNames().map(g => {
     const list = servers.filter(s => groupOf(s) === g && hit(s)).sort((a, b) => a.name.localeCompare(b.name));
     if (!list.length) return null;
@@ -1802,20 +2150,58 @@ function closeServer(serverId) {
 }
 
 // Right-click on a server tab.
-function serverDetails(s) {
+// Key/value table of one server (tab right-click "Get server details" and the All Servers side panel).
+async function detailsTable(s) {
+  // OS info lands in the background after connecting, so read the saved entry fresh.
+  s = (await api.servers.list().catch(() => [])).find(x => x.id === s.id) || s;
   const a = avail[s.id], e = envById(envOfServer(s));
-  const rows = [['Name', s.name], ['Host', s.host], ['User', s.username], ['Port', s.port], ['Type', !s.local && typeOf(s).toUpperCase()],
-    ['Group', s.group], ['Environment', e && `${envIcon(e)} ${e.name}`], ['Tags', s.tags?.join(', ')], ['OS', s.os], ['Details', s.details],
-    ['Reachable', a && `${a.server === 'up' ? 'yes' : 'no'} · checked ${new Date(a.at).toLocaleString()}`]].filter(r => r[1]);
-  ask({ title: s.name, ok: 'Close', body: el('table', { className: 'kv' },
-    ...rows.map(([k, val]) => el('tr', {}, el('td', { className: 'muted', textContent: k }), el('td', { className: 'mono', textContent: String(val) })))) });
+  const field = (k, v) => v ? el('div', { className: 'dfield' }, el('span', { className: 'dk', textContent: k }), el('span', { className: 'dv mono', textContent: String(v) })) : null;
+  // Filled in by the first SSH connection (the OS is read then): until then show "Unknown" with an explanation.
+  const learned = (k, v) => {
+    if (v) return field(k, v);
+    const note = el('div', { className: 'dnote', hidden: true, textContent: 'This is read from the server when you connect to it, so it is only updated after the first connection (and refreshed on later ones).' });
+    const info = iconBtn('i', 'Why is this unknown?', () => { note.hidden = !note.hidden; }, 'dinfo');
+    return el('div', { className: 'dfield' }, el('span', { className: 'dk' }, k, info),
+      el('span', { className: 'dv unk' }, el('i', { textContent: 'Unknown' })), note);
+  };
+  // "Detected" = when the OS was last read (on connect). The info explains that and shows the keep alive policy.
+  const policy = (await api.settings.get().catch(() => null))?.avail;
+  const detected = v => {
+    const note = el('div', { className: 'dnote', hidden: true },
+      el('p', { textContent: 'The OS and kernel are read from the server when you connect, so they are only updated after a connection.' }),
+      el('p', { textContent: 'Keep alive policy: ' + (!policy ? 'unknown' : policy.on ? `checking every ${policy.intervalSec} s (a quick connect to the SSH / desktop port).` : 'background checking is off.') }),
+      el('button', { type: 'button', className: 'sm', textContent: 'Open Settings → Keep alive', onclick: async () => { await openSettings(); settingsTab('avail'); } }));
+    const info = iconBtn('i', 'About this value and the keep alive policy', () => { note.hidden = !note.hidden; }, 'dinfo');
+    return el('div', { className: 'dfield' }, el('span', { className: 'dk' }, 'Detected', info),
+      el('span', { className: 'dv' + (v ? ' mono' : ' unk') }, v ? el('span', { textContent: v }) : el('i', { textContent: 'Unknown' })), note);
+  };
+  const sec = (title, ...items) => el('section', { className: 'dsec' }, el('h6', { textContent: title }), ...items);
+  const state = !a ? ['none', 'Not checked yet'] : a.server === 'up' ? ['up', 'Reachable'] : ['down', 'Not reachable'];
+  const table = el('div', { className: 'dpanel' },
+    el('div', { className: 'dstate ' + state[0], title: a ? `Checked ${new Date(a.at).toLocaleString()}` : '' }, el('span', { className: 'av ' + state[0] }), state[1],
+      s.local ? null : el('span', { className: 'proto ' + typeOf(s), textContent: typeOf(s).toUpperCase() })),
+    sec('Connection', field('Host', s.host), field('User', s.username), field('Port', s.port), field('Notifications', isMuted(s.id) ? '🔇 Muted' : '🔔 On')),
+    sec('Organization', field('Group', s.group), field('Environment', e && `${envIcon(e)} ${e.name}`), field('Tags', tagsOf(s).join(', '))),
+    s.local ? null : sec('System', learned('OS', s.osInfo || s.os), learned('Kernel', s.kernel), detected(s.osAt && new Date(s.osAt).toLocaleString())),
+    s.details ? sec('Notes', el('p', { className: 'dnotes', textContent: s.details })) : null);
+  return { s, table };
 }
+async function serverDetails(s) {
+  const d = await detailsTable(s);
+  ask({ title: d.s.name, ok: 'Close', body: d.table });
+}
+const copyText = t => navigator.clipboard.writeText(t).then(() => toast(`Copied ${t}`), err => toast(cleanErr(err), true));
 async function tabMenu(sid) {
   const v = views.get(sid), s = servers.find(x => x.id === sid) || v.server;
-  const ids = tabIds(), i = ids.indexOf(sid), failed = [...views.values()].filter(x => x.failed).length;
+  const ids = tabIds(), i = ids.indexOf(sid), failed = failedViews().length;
   const pick = await api.menu([
     { id: 'details', label: 'Get server details' },
     { id: 'edit', label: 'Edit Server', enabled: !s.local },
+    { id: 'copyIp', label: 'Copy host IP', enabled: !s.local && !!s.host },
+    { id: 'copyName', label: 'Copy host name' },
+    { id: 'info', label: 'Server info' },
+    { id: 'mute', label: isMuted(sid) ? 'Unmute notifications' : 'Mute notifications' },
+    ...(s.group ? [{ id: 'muteGroup', label: allMuted(idsOfGroup(s.group)) ? `Unmute all servers in ${s.group}` : `Mute all servers in ${s.group}` }] : []),
     { sep: true },
     { id: 'reconnect', label: 'Reconnect', enabled: !v.connId || v.failed },
     { id: 'failed', label: `Reconnect failed${failed ? ` (${failed})` : ''}`, enabled: !!failed },
@@ -1831,6 +2217,11 @@ async function tabMenu(sid) {
   ({
     details: () => serverDetails(s),
     edit: () => editServer(s),
+    copyIp: () => copyText(s.host),
+    copyName: () => copyText(s.name),
+    info: () => showServerInfo(s),
+    mute: () => setMute([sid], !isMuted(sid)),
+    muteGroup: () => setMute(idsOfGroup(s.group), !allMuted(idsOfGroup(s.group))),
     reconnect: () => reconnect(sid),
     failed: () => $('#reconnAll').click(),
     close: () => closeServer(sid),
@@ -1869,6 +2260,16 @@ async function openServer(s) {
     : `${s.username}@${s.host}:${s.port}`;
   q('.sdetails').textContent = q('.sdetails').title = s.details || '';
   q('.sdetails').hidden = !s.details;
+  // OS / kernel in the header: read after the first connection, so look again shortly after connecting
+  const paintSys = async () => {
+    const cur = (await api.servers.list().catch(() => [])).find(x => x.id === s.id);
+    const k = (cur?.kernel || '').split(' ');
+    const t = [cur?.osInfo, k[0] && `${k[0]} ${k[2] || ''}`.trim()].filter(Boolean).join(' · ');
+    q('.ssys').textContent = t;
+    q('.ssys').title = [cur?.osInfo, cur?.kernel].filter(Boolean).join('\n');
+    q('.ssys').hidden = !t;
+  };
+  if (!s.local) { paintSys(); v.paintSys = paintSys; }
   q('.back').onclick = () => show('home');
   const setStatus = (text, cls) => { q('.status').textContent = text; q('.status').className = 'status ' + cls; };
 
@@ -1877,7 +2278,7 @@ async function openServer(s) {
   function pickPanel(name) {
     v.panel = name;
     root.querySelectorAll('.panel').forEach(p => (p.hidden = !p.classList.contains(name)));
-    root.querySelectorAll('.srvbody > .side .navitem').forEach(b => b.classList.toggle('active', b.dataset.panel === name));
+    root.querySelectorAll('.srvbody > .side .navitem[data-panel]').forEach(b => b.classList.toggle('active', b.dataset.panel === name));
     if (!v.connId) return;
     if (name === 'term') {
       if (!sessions.length && !v.termOpened) newSession();
@@ -1887,7 +2288,7 @@ async function openServer(s) {
     if (name === 'files' && !fm.loaded) loadDir('');
     if (name === 'stats') loadStats(); // measure every time the tab is opened
   }
-  root.querySelectorAll('.srvbody > .side .navitem').forEach(b => (b.onclick = () => pickPanel(b.dataset.panel)));
+  root.querySelectorAll('.srvbody > .side .navitem[data-panel]').forEach(b => (b.onclick = () => pickPanel(b.dataset.panel)));
 
   // ---- terminal sessions (tabs) ----
   const sessions = [];
@@ -1946,6 +2347,7 @@ async function openServer(s) {
     if (e.key === 'Escape') { q('.tsearch').value = ''; runSearch(); active?.t.term.focus(); }
   };
   v.focusSearch = () => { q('.tsearch').focus(); q('.tsearch').select(); };
+  v.sess = { list: () => sessions, cur: () => active, go: s => activateSession(s) }; // for the tab shortcuts
 
   function activateSession(sess) {
     active = sess;
@@ -2027,13 +2429,21 @@ async function openServer(s) {
 
   // ---- file manager ----
   const fm = { path: '', entries: [], loaded: false, sort: { key: 'name', asc: true } };
+  const dirCache = new Map(); // ponytail: unbounded per tab; LRU-cap it if memory ever matters
+  let loadSeq = 0;
+  const showDir = r => { Object.assign(fm, r, { loaded: true }); q('.path').value = r.path; renderFiles(); };
+  // Revisited folders render instantly from cache, then refresh; only the latest request may render.
   async function loadDir(dir) {
+    const seq = ++loadSeq;
+    const hit = dir && dirCache.get(dir);
+    if (hit) showDir(hit);
     try {
       const r = await api.sftp.list(v.connId, dir);
-      Object.assign(fm, r, { loaded: true });
-      q('.path').value = r.path;
-      renderFiles();
+      dirCache.set(r.path, r);
+      if (seq === loadSeq) showDir(r);
     } catch (e) {
+      if (dir) dirCache.delete(dir);
+      if (seq !== loadSeq) return;
       toast(`Cannot open ${dir || 'home'}: ${cleanErr(e)}`, true);
       q('.path').value = fm.path;
     }
@@ -2050,6 +2460,7 @@ async function openServer(s) {
       th.classList.toggle('on', on);
       th.querySelector('.sorti').textContent = on ? (fm.sort.asc ? '▲' : '▼') : '⇅';
     }
+    q('.fm').classList.toggle('one', fmSingleClick());
     q('.frows').replaceChildren(...list.map(e => {
       const isDir = e.type === 'dir';
       const cwd = isDir ? e.path : fm.path;
@@ -2069,7 +2480,9 @@ async function openServer(s) {
             : iconBtn('≡⁺', 'Add to Logs', () => v.addToLogs(e.path)),
           iconBtn('⤓', isDir ? 'Download as .tar.gz' : 'Download', () => download(e)),
           iconBtn('🗑', 'Delete', () => remove(e), 'icon danger')));
-      tr.ondblclick = () => (isDir ? loadDir(e.path) : download(e));
+      const act = () => (isDir ? loadDir(e.path) : download(e));
+      if (fmSingleClick()) tr.onclick = ev => { if (!ev.target.closest('.actions') && !String(getSelection())) act(); };
+      else tr.ondblclick = act;
       return tr;
     }));
     const dirs = list.filter(e => e.type === 'dir').length;
@@ -2091,29 +2504,36 @@ async function openServer(s) {
     };
   }
 
-  // ---- transfers: a card per upload/download with %, speed and time left ----
+  // ---- transfers: a card per upload/download with %, speed and time left; Cancel while running, Resume after a stop ----
   const fmtDur = sec => (sec < 60 ? `${Math.max(1, Math.round(sec))}s` : sec < 3600 ? `${Math.floor(sec / 60)}m ${String(Math.round(sec % 60)).padStart(2, '0')}s` : `${Math.floor(sec / 3600)}h ${Math.round((sec % 3600) / 60)}m`);
-  function transfer(kind) { // kind: 'up' | 'down'
-    const id = Math.random().toString(36).slice(2);
-    let card = null, t0 = 0, last = { t: 0, done: 0 }, speed = 0, cur = { done: 0, total: 0 };
+  // run(id, resume, info): performs the transfer (info.target = file saved so far); resolves with the API result.
+  // Single files resume from the bytes already there; folders restart (labelled Retry).
+  function transfer(kind, { resumable, run }) { // kind: 'up' | 'down'
+    let card = null, t0 = 0, last = { t: 0, done: 0 }, speed = 0, cur = { done: 0, total: 0 }, id = '';
+    const info = { target: '' };
     const make = name => {
-      t0 = last.t = performance.now();
       const fill = el('i'), pct = el('b', { className: 'xpct' }), meta = el('small', { className: 'xmeta mono' });
+      const cancel = el('button', { type: 'button', className: 'xcancel', title: 'Cancel this transfer (a partial file can be resumed)', 'aria-label': 'Cancel transfer', onclick: () => api.sftp.cancel(id) });
+      cancel.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>'; // static markup
+      const resume = el('button', { type: 'button', className: 'sm primary xresume', textContent: resumable ? 'Resume' : 'Retry', hidden: true,
+        title: resumable ? 'Continue from where it stopped' : 'Folders start again from the beginning', onclick: () => go(true) });
       card = el('div', { className: `xfer ${kind} running` },
         el('span', { className: 'xicon' }, el('span', { textContent: kind === 'up' ? '⤒' : '⤓' })),
         el('div', { className: 'xmain' },
           el('div', { className: 'xline' }, el('b', { className: 'xname', textContent: name, title: name }), el('span', { className: 'grow' }), pct),
           el('div', { className: 'xbar' }, fill), meta),
+        cancel, resume,
         iconBtn('×', 'Dismiss', () => card.remove(), 'icon xclose'));
-      Object.assign(card, { fill, pct, meta });
+      Object.assign(card, { fill, pct, meta, resume });
       q('.xfers').append(card);
     };
-    xferHandlers.set(id, p => {
+    const onProgress = p => {
       if (!card) make(p.name);
       const now = performance.now(), dt = (now - last.t) / 1000;
+      if (p.target) info.target = p.target;
       if (dt > 0.2) { // smoothed speed, so the estimate doesn't jump around
         const inst = (p.done - last.done) / dt;
-        speed = speed ? speed * 0.7 + inst * 0.3 : inst;
+        speed = speed ? speed * 0.7 + Math.max(0, inst) * 0.3 : Math.max(0, inst);
         last = { t: now, done: p.done };
       }
       cur = p;
@@ -2124,32 +2544,43 @@ async function openServer(s) {
       card.pct.textContent = known ? `${Math.floor(frac * 100)}%` : '';
       const left = known && speed > 0 ? ` · ${fmtDur((p.total - p.done) / speed)} left` : '';
       card.meta.textContent = `${fmtSize(p.done)}${known ? ` of ${fmtSize(p.total)}` : ''}${speed > 0 ? ` · ${fmtSize(speed)}/s` : ''}${left}`;
-    });
-    return {
-      id,
-      finish(err) {
-        xferHandlers.delete(id);
-        if (!card) return; // cancelled before it started (file dialog)
-        const secs = (performance.now() - t0) / 1000;
-        card.classList.remove('running', 'unknown');
-        card.classList.add(err ? 'failed' : 'done');
-        card.querySelector('.xicon span').textContent = err ? '✕' : '✓';
-        if (err) { card.meta.textContent = cleanErr(err); return; }
-        card.fill.style.width = '100%';
-        card.pct.textContent = '100%';
-        card.meta.textContent = `Done · ${fmtSize(cur.done)} in ${fmtDur(secs)}` + (secs > 1 && cur.done ? ` · avg ${fmtSize(cur.done / secs)}/s` : '');
-        setTimeout(() => { card.classList.add('gone'); setTimeout(() => card.remove(), 400); }, 6000);
-      },
     };
+    function finish(err) {
+      xferHandlers.delete(id);
+      if (!card) return; // cancelled before it started (file dialog)
+      const secs = (performance.now() - t0) / 1000;
+      card.classList.remove('running', 'unknown');
+      card.classList.toggle('failed', !!err);
+      card.classList.toggle('done', !err);
+      card.querySelector('.xicon span').textContent = err ? '✕' : '✓';
+      if (err) {
+        const stopped = /Cancelled/.test(cleanErr(err));
+        card.meta.textContent = (stopped ? 'Cancelled' : cleanErr(err)) + (cur.done ? ` · ${fmtSize(cur.done)} sent so far` : '');
+        card.resume.hidden = false;
+        return;
+      }
+      card.resume.hidden = true;
+      card.fill.style.width = '100%';
+      card.pct.textContent = '100%';
+      card.meta.textContent = `Done · ${fmtSize(cur.done)} in ${fmtDur(secs)}` + (secs > 1 && cur.done ? ` · avg ${fmtSize(cur.done / secs)}/s` : '');
+      setTimeout(() => { card.classList.add('gone'); setTimeout(() => card.remove(), 400); }, 6000);
+    }
+    async function go(resume) {
+      id = Math.random().toString(36).slice(2);
+      t0 = last.t = performance.now(); last.done = 0; speed = 0;
+      if (card) { card.classList.remove('failed', 'done'); card.classList.add('running'); card.resume.hidden = true; card.querySelector('.xicon span').textContent = kind === 'up' ? '⤒' : '⤓'; }
+      xferHandlers.set(id, onProgress);
+      try { const r = await run(id, resume, info); finish(); return r; }
+      catch (err) { finish(err); if (!/Cancelled/.test(cleanErr(err))) toast(`${kind === 'up' ? 'Upload' : 'Download'} failed: ${cleanErr(err)}`, true); }
+    }
+    return go;
   }
 
   async function download(e) {
-    const x = transfer('down');
-    try {
-      const saved = await api.sftp.download(v.connId, e.path, e.type === 'dir', x.id);
-      x.finish();
-      if (saved) toast(`Saved to ${saved}`);
-    } catch (err) { x.finish(err); toast(`Download failed: ${cleanErr(err)}`, true); }
+    const isDir = e.type === 'dir';
+    const saved = await transfer('down', { resumable: !isDir, run: (id, resume, info) =>
+      api.sftp.download(v.connId, e.path, isDir, id, resume ? info.target : undefined) })(false);
+    if (saved) toast(`Saved to ${saved}`);
   }
 
   async function remove(e) {
@@ -2159,12 +2590,11 @@ async function openServer(s) {
   }
 
   async function upload(locals) {
-    const x = transfer('up');
-    try {
-      const n = await api.sftp.upload(v.connId, fm.path, locals, x.id);
-      x.finish();
-      if (n) toast(`Uploaded ${n} item${n === 1 ? '' : 's'} to ${fm.path}`);
-    } catch (err) { x.finish(err); toast(`Upload failed: ${cleanErr(err)}`, true); }
+    if (!locals?.length) locals = await api.deploy.pickFiles(); // chosen here (not in main) so Resume can reuse the same files
+    if (!locals.length) return;
+    const dir = fm.path; // a resume goes to the same folder even if you browse elsewhere meanwhile
+    const n = await transfer('up', { resumable: true, run: (id, resume) => api.sftp.upload(v.connId, dir, locals, id, resume) })(false);
+    if (n) toast(`Uploaded ${n} item${n === 1 ? '' : 's'} to ${dir}`);
     loadDir(fm.path);
   }
 
@@ -2519,7 +2949,7 @@ async function openServer(s) {
         state.set(k, { val, threshold: a.threshold, since: Date.now() });
         const msg = `${s.name}: ${KNAME[k]} at ${Math.round(val)}% (alert above ${a.threshold}%)`;
         toast('🔔 ' + msg, true);
-        notify('EranTerm alert', msg);
+        if (!isMuted(s.id)) notify('EranTerm alert', msg);
       } else if (val < a.threshold - 5) { firing[k] = false; state.delete(k); }
       else if (firing[k]) state.set(k, { ...state.get(k), val }); // keep the latest value for the tooltip
     }
@@ -2700,7 +3130,7 @@ async function openServer(s) {
   v.checkAlerts = checkAlerts;
 
   // ---- lifecycle ----
-  v.onShow = () => { if (v.panel === 'term') active?.t.term.focus(); };
+  v.onShow = () => { requestAnimationFrame(syncHist); if (v.panel === 'term') active?.t.term.focus(); };
   v.disconnected = msg => {
     v.connId = null;
     stopTail();
@@ -2710,6 +3140,7 @@ async function openServer(s) {
     if (msg) toast(`${s.name}: ${msg}`, true);
   };
   v.dispose = () => {
+    api.hist.destroy(s.id);
     alertState.delete(s.id);
     clearInterval(statsTimer);
     stopTail();
@@ -2721,6 +3152,90 @@ async function openServer(s) {
     tabEl.remove();
   };
   q('.status').onclick = () => { if (!v.connId) reconnect(s.id); };
+
+  // ---- mute button (top row) + Info window (right side): Info tab and Connection settings tab ----
+  if (s.local) { q('.smute').hidden = q('.sinfobtn').hidden = true; }
+  v.paintMute = () => { paintMuteBtn(q('.smute'), isMuted(s.id), s.name); if (v.info?.open) paintInfo(); };
+  q('.smute').onclick = () => setMute([s.id], !isMuted(s.id));
+  v.info = { open: false, tab: 'info' };
+  async function paintInfo() {
+    const box = q('.sinfo');
+    box.hidden = !v.info.open;
+    q('.sinfobtn').classList.toggle('on', v.info.open);
+    if (!v.info.open) return;
+    const cur = servers.find(x => x.id === s.id) || s;
+    const tabs = el('div', { className: 'sitabs' }, ...[['info', 'Info'], ['conn', 'Connection settings']].map(([k, l]) =>
+      el('button', { type: 'button', className: v.info.tab === k ? 'on' : '', textContent: l, onclick: () => { v.info.tab = k; paintInfo(); } })));
+    const head = el('div', { className: 'sphead' }, el('b', { textContent: cur.name, title: cur.name }), el('span', { className: 'grow' }),
+      iconBtn('×', 'Close', () => { v.info.open = false; paintInfo(); }));
+    const body = v.info.tab === 'info' ? (await detailsTable(cur)).table : connSettings(cur);
+    if (!v.info.open) return;
+    box.replaceChildren(head, tabs, body);
+  }
+  // Every connection setting of this server, plus the notification mute. Editing the connection uses the Edit dialog.
+  function connSettings(cur) {
+    const alerts = Object.entries(cur.alerts || {}).filter(([, a]) => a.on).map(([k, a]) => `${METRIC_NAME[k]} > ${a.threshold}%`).join(', ');
+    const auth = cur.userId ? `Saved user: ${cur.userLabel}` : cur.keyPath ? `Key file ${cur.keyPath}` : cur.hasPassword ? 'Saved password' : 'SSH agent / ask when connecting';
+    const mute = el('input', { type: 'checkbox', checked: isMuted(cur.id), onchange: e => setMute([cur.id], e.target.checked) });
+    return el('div', { className: 'dpanel' },
+      dSec('Connection', dField('Type', typeOf(cur).toUpperCase()), dField('Host', cur.host), dField('Port', cur.port),
+        typeOf(cur) === 'rdp' ? dField('SSH port', cur.sshPort || 22) : null, dField('User', cur.username), dField('Domain', cur.domain), dField('Login', auth)),
+      dSec('Organization', dField('Group', cur.group), dField('Environment', envById(envOfServer(cur))?.name), dField('Tags', tagsOf(cur).join(', '))),
+      dSec('Monitoring', dField('Keep alive', cur.noProbe ? 'Off for this server' : 'On: checked in the background (see Settings)'), dField('Alerts', alerts || 'None')),
+      dSec('Notifications', el('label', { className: 'row dmute' }, mute, ' Mute notifications for this server'),
+        el('small', { className: 'muted dmutenote', textContent: 'Muted: no popups for availability changes or metric alerts. Also set from the page header, the right-click menus, groups and environments.' })),
+      el('div', { className: 'spacts' },
+        el('button', { type: 'button', className: 'sm primary', textContent: '✎ Edit connection…', onclick: () => editServer(cur) }),
+        el('button', { type: 'button', className: 'sm', textContent: 'Keep alive settings', onclick: async () => { await openSettings(); settingsTab('avail'); } })));
+  }
+  q('.sinfobtn').onclick = () => { v.info.open = !v.info.open; paintInfo(); };
+  v.openInfo = tab => { v.info = { open: true, tab: tab || 'info' }; paintInfo(); };
+  v.paintMute();
+
+  // ---- History: the Log Console filtered to this server, docked under the page (or in its own window) ----
+  const hd = q('.histdock'), hnav = q('.histnav');
+  let histDrag = false;
+  v.hist = { open: false, undocked: false };
+  const histMeta = () => ({ name: s.name, host: s.host });
+  function syncHist() { // the docked page is a native view laid over .histdock, so tell main where that box is
+    const r = hd.getBoundingClientRect();
+    const show = v.hist.open && !v.hist.undocked && !root.hidden && r.width > 0 && !histDrag; // hidden while dragging: a native view would swallow the mouse
+    api.hist.bounds(s.id, show ? { x: r.left, y: r.top, width: r.width, height: r.height } : null, histMeta());
+  }
+  const grip = q('.histgrip');
+  try { const hh = Number(localStorage.getItem('histH')); if (hh) hd.style.height = `${hh}px`; } catch { /* default */ }
+  grip.onmousedown = e => { // drag the strip above the panel: up = taller
+    e.preventDefault();
+    histDrag = true; syncHist();
+    const y0 = e.clientY, h0 = hd.getBoundingClientRect().height, max = root.getBoundingClientRect().height - 160;
+    const move = ev => { hd.style.height = `${Math.round(Math.min(max, Math.max(100, h0 + y0 - ev.clientY)))}px`; };
+    const up = () => {
+      histDrag = false; syncHist();
+      document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); document.body.classList.remove('vresizing');
+      try { localStorage.setItem('histH', parseInt(hd.style.height, 10)); } catch { /* not remembered */ }
+    };
+    document.body.classList.add('vresizing');
+    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+  };
+  function paintHist() {
+    hd.hidden = grip.hidden = !(v.hist.open && !v.hist.undocked);
+    hnav.classList.toggle('active', v.hist.open);
+    requestAnimationFrame(syncHist);
+  }
+  hnav.onclick = () => {
+    v.hist.open = !v.hist.open;
+    if (!v.hist.open) { v.hist.undocked = false; api.hist.closeWin(s.id); }
+    paintHist();
+  };
+  new ResizeObserver(syncHist).observe(hd);
+  new ResizeObserver(() => requestAnimationFrame(syncHist)).observe(q('.srvbody'));
+  v.histOp = op => { // from the History page itself: 'dock' | 'undock' | 'close'
+    if (op === 'undock') { v.hist.undocked = true; api.hist.undock(s.id, histMeta()); }
+    else if (op === 'dock') { v.hist.undocked = false; api.hist.closeWin(s.id); }
+    else { v.hist.open = false; v.hist.undocked = false; api.hist.closeWin(s.id); }
+    paintHist();
+  };
+  v.syncHist = syncHist;
 
   pickPanel(s.local ? 'term' : defaultPanel());
   show(s.id);
@@ -2735,6 +3250,7 @@ async function openServer(s) {
   }
   if (!views.has(s.id)) return api.ssh.disconnect(v.connId); // tab closed while connecting
   setStatus('● CONNECTED', 'on');
+  if (!s.local) for (const ms of [3000, 10000]) setTimeout(() => { if (views.has(s.id)) paintSys(); }, ms); // OS detection finishes in the background
   pickPanel(v.panel);
   if (s.local) v.pollMetrics = () => {}; // no metrics without SSH
   v.pollMetrics();
@@ -2831,7 +3347,7 @@ function renderEnvPage() {
   const allGroups = [...new Set([...savedGroups, ...servers.map(s => s.group).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
   const q = envUi.q;
   const has = (...v) => v.some(x => String(x || '').toLowerCase().includes(q));
-  const srvMatch = s => has(s.name, s.host, s.group, s.details, ...(s.tags || []));
+  const srvMatch = s => has(s.name, s.host, s.group, s.details, ...tagsOf(s));
   const info = e => {
     const names = allGroups.filter(g => envOfGroup(g) === e.id);
     return { e, names, loose: servers.filter(s => !s.group && envOfServer(s) === e.id), total: servers.filter(s => envOfServer(s) === e.id).length };
@@ -2841,7 +3357,7 @@ function renderEnvPage() {
   const by = { name: (a, b) => a.e.name.localeCompare(b.e.name), servers: (a, b) => b.total - a.total || a.e.name.localeCompare(b.e.name), groups: (a, b) => b.names.length - a.names.length || a.e.name.localeCompare(b.e.name) }[envUi.sort];
   if (by) rows.sort(by);
   const chips = list => el('div', { className: 'envsrv' }, ...(list.length ? list.map(s => el('span', { className: 'dchip on', title: s.host },
-    el('b', { textContent: s.name }), el('small', { className: 'mono', textContent: s.host }))) : [el('small', { className: 'muted', textContent: 'no servers' })]));
+    el('b', { textContent: s.name }), el('small', { className: 'mono', textContent: s.host }), muteBtn([s.id], s.name, 'span', 'sm'))) : [el('small', { className: 'muted', textContent: 'no servers' })]));
   $('#envsList').replaceChildren(...(rows.length ? rows.map(({ e, names, loose, total }) => {
     const open = envUi.open.has(e.id) || !!q; // a search opens the matches
     const nGroups = `${names.length} group${names.length === 1 ? '' : 's'}`, nSrv = `${total} server${total === 1 ? '' : 's'}`;
@@ -2855,7 +3371,7 @@ function renderEnvPage() {
         el('div', { className: 'envghead', onclick: () => { const k = e.id + '|' + g; envUi.shut.has(k) ? envUi.shut.delete(k) : envUi.shut.add(k); renderEnvPage(); } },
           el('span', { className: 'caret', textContent: shut ? '▸' : '▾' }), el('b', { textContent: g }),
           el('small', { className: 'muted', textContent: `${members.length} server${members.length === 1 ? '' : 's'}` }),
-          el('span', { className: 'grow' }), sel,
+          el('span', { className: 'grow' }), sel, muteBtn(idsOfGroup(g), `all servers in ${g}`),
           iconBtn('✎', `Edit group ${g}`, () => editGroup(g))),
         shut ? null : chips(q ? members.filter(s => !has(g) && !has(e.name) ? srvMatch(s) : true) : members)), g);
     });
@@ -2865,6 +3381,7 @@ function renderEnvPage() {
         el('b', { textContent: `${envIcon(e)} ${e.name}` }),
         el('small', { className: 'muted', textContent: `${nGroups} · ${nSrv}` }),
         el('span', { className: 'grow' }),
+        muteBtn(idsOfEnv(e.id), `all servers in ${e.name}`),
         ...(e.id === 'team' ? [] : [iconBtn('＋', 'New group in this environment', () => editGroup('', e.id))]),
         iconBtn('✎', 'Edit environment (name, description, color, parameters)', () => editEnv(e.id)),
         ...(!e.builtin ? [iconBtn('🗑', 'Delete environment', () => deleteEnv(e), 'icon danger')] : [])),
@@ -2895,16 +3412,11 @@ function paintAcct() {
   const a = acctInfo, box = $('#ftAcct');
   if (!box) return;
   if (!a.signedIn) {
-    box.replaceChildren(el('button', { title: a.configured ? 'Sign in or sign up with Google' : 'Account settings', textContent: '👤 Sign in / Sign up',
-      onclick: async e => {
-        if (!a.configured) { await openSettings(); return settingsTab('account'); }
-        e.currentTarget.disabled = true;
-        try { toast('Finish signing in in your browser…'); acctInfo = await api.account.signIn(); } catch (err) { toast(cleanErr(err), true); }
-        paintAcct();
-      } }));
+    box.replaceChildren(el('button', { title: 'Account: sign in or sign up (opens Settings → Account)', textContent: '👤 Sign in / Sign up',
+      onclick: async () => { await openSettings(); settingsTab('account'); } })); // sign in / up lives in Settings → Account
     return;
   }
-  box.replaceChildren(el('span', { className: 'ftuser', title: a.email, textContent: `👤 ${a.name || (a.email || '').split('@')[0]}` }),
+  box.replaceChildren(el('span', { className: 'ftuser', title: `${a.email} — click for account settings`, onclick: async () => { await openSettings(); settingsTab('account'); }, textContent: `👤 ${a.name || (a.email || '').split('@')[0]}` }),
     el('button', { title: 'Account settings: sign out or change settings', textContent: '⎋',
       onclick: async () => { await openSettings(); settingsTab('account'); } }));
 }

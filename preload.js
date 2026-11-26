@@ -54,7 +54,16 @@ contextBridge.exposeInMainWorld('api', {
     publish: (kind, id) => ipcRenderer.invoke('team:publish', kind, id), // kind: server|script|deployment|vars
     copyToPersonal: (kind, id) => ipcRenderer.invoke('team:copyToPersonal', kind, id),
   },
-  ui: { onSettings: on('ui:settings') }, // application menu → Settings…
+  mute: { list: () => ipcRenderer.invoke('mute:list'), set: (ids, on) => ipcRenderer.invoke('mute:set', ids, on) }, // per-server notification mute
+  hist: { // per-server History (Log Console filtered to one server)
+    bounds: (sid, rect, meta) => ipcRenderer.invoke('hist:bounds', sid, rect, meta), // rect null = hide
+    undock: (sid, meta) => ipcRenderer.invoke('hist:undock', sid, meta),
+    closeWin: sid => ipcRenderer.send('hist:closeWin', sid),
+    destroy: sid => ipcRenderer.send('hist:destroy', sid),
+    request: (sid, op) => ipcRenderer.send('hist:request', sid, op),
+    onRequest: on('ui:hist'),
+  },
+  ui: { onSettings: on('ui:settings'), onDock: on('ui:dock'), onServersChanged: on('servers:changed') }, // application menu → Settings…
   feedback: {
     send: text => ipcRenderer.invoke('feedback:send', text),
     onOpen: on('ui:feedback'), // Help → Send Feedback…
@@ -72,6 +81,9 @@ contextBridge.exposeInMainWorld('api', {
     clear: () => ipcRenderer.send('log:clear'),
     openFolder: () => ipcRenderer.invoke('log:openFolder'),
     openConsole: () => ipcRenderer.send('log:openConsole'),
+    dockMode: () => ipcRenderer.invoke('log:dockMode'),
+    dock: mode => ipcRenderer.invoke('log:dock', mode), // 'undocked' | 'bottom' | 'right'
+    close: () => ipcRenderer.send('log:close'),
     onLine: on('log:line'),
     debug: on => ipcRenderer.invoke('log:debug', on), // on: true/false sets it, undefined reads it
   },
@@ -100,8 +112,9 @@ contextBridge.exposeInMainWorld('api', {
     list: (connId, dir) => ipcRenderer.invoke('sftp:list', connId, dir),
     mkdir: (connId, dir) => ipcRenderer.invoke('sftp:mkdir', connId, dir),
     delete: (connId, p) => ipcRenderer.invoke('sftp:delete', connId, p),
-    download: (connId, p, isDir, xferId) => ipcRenderer.invoke('sftp:download', connId, p, isDir, xferId),
-    upload: (connId, dir, locals, xferId) => ipcRenderer.invoke('sftp:upload', connId, dir, locals, xferId),
+    download: (connId, p, isDir, xferId, resumeTo) => ipcRenderer.invoke('sftp:download', connId, p, isDir, xferId, resumeTo),
+    upload: (connId, dir, locals, xferId, resume) => ipcRenderer.invoke('sftp:upload', connId, dir, locals, xferId, resume),
+    cancel: xferId => ipcRenderer.invoke('sftp:cancel', xferId),
     onProgress: on('sftp:progress'),
   },
   logs: {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, dialog, shell, clipboard, Menu } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, safeStorage, dialog, shell, clipboard, Menu } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { Client } = require('ssh2');
 const fs = require('node:fs');
@@ -67,6 +67,7 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   win.loadFile('index.html');
+  win.on('resize', layoutDock);
 }
 
 // ---------- app log: Log Console + optional log file ----------
@@ -76,6 +77,7 @@ function createWindow() {
 const LOG_MAX = 3000;
 const logBuf = [];
 let logWin, logFile = '';
+const hists = new Map(); // serverId -> { view (docked in the server page), win (undocked) }: Log Console filtered to one server
 const logFileIn = dir => path.join(dir, 'eranterm.log');
 function setLogFile(dir) {
   fs.mkdirSync(dir, { recursive: true }); // throws before logFile is set, so a bad folder never half-enables
@@ -88,7 +90,7 @@ function logLine(level, args) {
   const line = `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} ${text}`;
   logBuf.push(line);
   if (logBuf.length > LOG_MAX) logBuf.shift();
-  if (logWin && !logWin.isDestroyed()) logWin.webContents.send('log:line', line);
+  logSend('log:line', line);
   if (logFile) fs.appendFile(logFile, line + '\n', () => {}); // a failed write must never break the app
 }
 for (const level of ['log', 'info', 'warn', 'error']) {
@@ -112,7 +114,7 @@ function audit(rec) {
   actBuf.push(a);
   if (actBuf.length > ACT_MAX) actBuf.shift();
   logLine('info', [`ACTION ${a.action} ${a.target || ''}${a.detail ? ' · ' + a.detail : ''}${a.ok === false ? ' · FAILED: ' + a.error : ''}`]);
-  if (logWin && !logWin.isDestroyed()) logWin.webContents.send('log:action', a);
+  logSend('log:action', a);
   fs.appendFile(actFile(), JSON.stringify(a) + '\n', () => {}); // a failed write must never break the app
 }
 function loadActions() {
@@ -130,6 +132,7 @@ const onOff = v => (v ? 'on' : 'off');
 const AUDIT = {
   'servers:save': s => ({ action: `server.${verb(servers(), s.id)}`, target: s.name, detail: `${s.username || ''}@${s.host}${s.group ? ' · group ' + s.group : ''}` }),
   'servers:delete': id => ({ action: 'server.delete', target: srvName(id) }),
+  'mute:set': (ids, on) => ({ action: `server.${on ? 'mute' : 'unmute'}`, target: (ids || []).length === 1 ? srvName(ids[0]) : `${(ids || []).length} servers` }),
   'servers:setAlerts': id => ({ action: 'server.alerts', target: srvName(id) }),
   'users:save': u => ({ action: `user.${verb(users(), u.id)}`, target: u.label || u.username, detail: u.clearPassword ? 'password removed' : u.password ? 'password set' : '' }),
   'users:delete': id => ({ action: 'user.delete', target: users().find(x => x.id === id)?.label || id }),
@@ -151,7 +154,7 @@ const AUDIT = {
   'settings:setAutoUpdate': on => ({ action: 'settings.autoUpdate', detail: onOff(on) }),
   'settings:setLog': a => ({ action: 'settings.logFile', detail: a.logToFile ? `on · ${a.logDir}` : 'off' }),
   'settings:setAi': a => ({ action: 'settings.ai', detail: `${a.provider}${a.model ? ' · ' + a.model : ''}${a.key ? ' · new key' : ''}` }),
-  'settings:setAvail': a => ({ action: 'settings.availability', detail: `${onOff(a.on)} · every ${a.intervalSec}s` }),
+  'settings:setAvail': a => ({ action: 'settings.keepAlive', detail: `${onOff(a.on)} · every ${a.intervalSec}s` }),
   'account:signIn': () => ({ action: 'account.signIn' }),
   'account:backupNow': () => ({ action: 'account.backup' }),
   'account:restore': () => ({ action: 'account.restore' }),
@@ -167,8 +170,8 @@ const AUDIT = {
   'remote:open': id => ({ action: 'desktop.open', target: srvName(id) }),
   'sftp:mkdir': (c, dir) => ({ action: 'file.mkdir', target: connName(c), detail: dir }),
   'sftp:delete': (c, t) => ({ action: 'file.delete', target: connName(c), detail: typeof t === 'string' ? t : JSON.stringify(t) }),
-  'sftp:upload': (c, dir, locals) => ({ action: 'file.upload', target: connName(c), detail: `${(locals || []).length} item(s) → ${dir}` }),
-  'sftp:download': (c, remote) => ({ action: 'file.download', target: connName(c), detail: remote }),
+  'sftp:upload': (c, dir, locals, _x, resume) => ({ action: 'file.upload', target: connName(c), detail: `${(locals || []).length} item(s) → ${dir}${resume ? ' (resumed)' : ''}` }),
+  'sftp:download': (c, remote, _d, _x, resumeTo) => ({ action: 'file.download', target: connName(c), detail: remote + (resumeTo ? ' (resumed)' : '') }),
   'ssh:kill': (c, pid, force) => ({ action: 'process.kill', target: connName(c), detail: `PID ${pid}${force ? ' (force)' : ''}` }),
   'maint:dropCaches': c => ({ action: 'maintenance.dropCaches', target: connName(c) }),
   'maint:cleanDisk': (c, ids) => ({ action: 'maintenance.cleanDisk', target: connName(c), detail: (ids || []).join(', ') }),
@@ -180,12 +183,14 @@ ipcMain.handle = (ch, fn) => handle(ch, async (e, ...args) => {
   if (!QUIET.has(ch)) console.debug(`IPC ${ch}`);
   let rec = null;
   try { rec = AUDIT[ch]?.(...args); } catch { rec = { action: ch }; }
+  const t0 = Date.now(); // the Action Log shows when it started and how long it took
+  const timing = () => ({ at: new Date(t0).toISOString(), ms: Date.now() - t0 });
   try {
     const r = await fn(e, ...args);
-    if (rec && !(ch.endsWith(':import') && !r)) audit(rec); // import cancelled: nothing happened
+    if (rec && !((ch.endsWith(':import') || ch === 'sftp:download') && !r)) audit({ ...rec, ...timing() }); // dialog cancelled: nothing happened
     return r;
   } catch (err) {
-    if (rec) audit({ ...rec, ok: false, error: String(err.message || err).replace(/^NO_API_KEY:\s*/, '').slice(0, 300) });
+    if (rec) audit({ ...rec, ...timing(), ok: false, error: String(err.message || err).replace(/^NO_API_KEY:\s*/, '').slice(0, 300) });
     else console.debug(`IPC ${ch} failed: ${err.message || err}`);
     throw err;
   }
@@ -195,13 +200,89 @@ ipcMain.handle('log:debug', (_e, on) => { if (on !== undefined) { debugOn = !!on
 ipcMain.handle('log:all', () => logBuf);
 ipcMain.on('log:clear', () => { logBuf.length = 0; });
 ipcMain.on('log:openConsole', () => openDebugConsole());
-function openDebugConsole() {
-  if (logWin && !logWin.isDestroyed()) return logWin.focus();
-  logWin = new BrowserWindow({ width: 1100, height: 650, title: 'EranTerm Log Console', backgroundColor: '#0b0d10',
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false } });
-  logWin.setMenuBarVisibility(false);
-  logWin.loadFile('debug.html');
+// Log Console: its own window (undocked) or a panel docked to the bottom / right edge of the main window.
+// Docked = a WebContentsView laid over that edge; the main page gets padding (ui:dock) so nothing is covered.
+let logMode = readJson('console.json', {}).mode;
+if (!['undocked', 'bottom', 'right'].includes(logMode)) logMode = 'undocked';
+const DOCK = { bottom: 320, right: 480 }; // px
+// Every open Log Console (main one + per-server History views / windows) gets new lines and actions.
+function logSend(ch, payload) {
+  for (const w of [logWC(), ...[...hists.values()].flatMap(h => [h.view?.webContents, h.win?.webContents])]) if (w && !w.isDestroyed()) w.send(ch, payload);
 }
+function logWC() { const w = logWin?.webContents; return w && !w.isDestroyed() ? w : null; } // a declaration: logLine can run before this line
+function layoutDock() {
+  if (!logWC() || logMode === 'undocked' || !win) return;
+  const [w, h] = win.getContentSize();
+  logWin.setBounds(logMode === 'right' ? { x: w - DOCK.right, y: 0, width: DOCK.right, height: h }
+    : { x: 0, y: h - DOCK.bottom, width: w, height: DOCK.bottom });
+  send('ui:dock', logMode === 'right' ? { r: DOCK.right } : { b: DOCK.bottom });
+}
+function closeLog() {
+  const w = logWin;
+  logWin = null;
+  if (!w) return;
+  if (logMode === 'undocked') { if (!w.isDestroyed()) w.close(); return; }
+  try { win?.contentView.removeChildView(w); w.webContents.close(); } catch { /* already gone */ }
+  send('ui:dock', {});
+}
+function openDebugConsole() {
+  if (logWC()) return logMode === 'undocked' ? logWin.focus() : logWin.webContents.focus();
+  const webPreferences = { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false };
+  if (logMode === 'undocked') {
+    const w = logWin = new BrowserWindow({ width: 1100, height: 650, title: 'EranTerm Log Console', backgroundColor: '#0b0d10', webPreferences });
+    w.setMenuBarVisibility(false);
+    w.on('closed', () => { if (logWin === w) logWin = null; });
+    w.loadFile('debug.html');
+  } else {
+    logWin = new WebContentsView({ webPreferences });
+    logWin.setBackgroundColor('#0b0d10');
+    win.contentView.addChildView(logWin);
+    logWin.webContents.loadFile('debug.html');
+    layoutDock();
+  }
+}
+// ---- per-server History: the Log Console page with ?server= filter, docked inside the server page or undocked ----
+const histPrefs = { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false };
+const histLoad = (wc, sid, meta, mode) => wc.loadFile('debug.html', { query: { server: String(meta.name || ''), host: String(meta.host || ''), sid, mode } });
+ipcMain.handle('hist:bounds', (_e, sid, r, meta) => {
+  let h = hists.get(sid);
+  if (!r) return h?.view?.setVisible(false);
+  if (!win) return;
+  if (!h) hists.set(sid, h = {});
+  if (!h.view) {
+    h.view = new WebContentsView({ webPreferences: histPrefs });
+    h.view.setBackgroundColor('#0b0d10');
+    win.contentView.addChildView(h.view);
+    histLoad(h.view.webContents, sid, meta, 'dock');
+  }
+  h.view.setVisible(true);
+  h.view.setBounds({ x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) });
+});
+ipcMain.handle('hist:undock', (_e, sid, meta) => {
+  const h = hists.get(sid);
+  if (!h || h.win) return;
+  h.view?.setVisible(false);
+  const w = h.win = new BrowserWindow({ width: 1000, height: 560, title: `History · ${meta.name}`, backgroundColor: '#0b0d10', webPreferences: histPrefs });
+  w.setMenuBarVisibility(false);
+  w.on('closed', () => { if (h.win === w) { h.win = null; send('ui:hist', sid, 'close'); } });
+  histLoad(w.webContents, sid, meta, 'win');
+});
+const histCloseWin = sid => { const h = hists.get(sid); const w = h?.win; if (w) { h.win = null; if (!w.isDestroyed()) w.close(); } };
+ipcMain.on('hist:closeWin', (_e, sid) => histCloseWin(sid));
+ipcMain.on('hist:destroy', (_e, sid) => {
+  histCloseWin(sid);
+  const h = hists.get(sid);
+  if (h?.view) { try { win?.contentView.removeChildView(h.view); h.view.webContents.close(); } catch { /* gone */ } }
+  hists.delete(sid);
+});
+ipcMain.on('hist:request', (_e, sid, op) => send('ui:hist', sid, op)); // a History page asked to dock / undock / close
+ipcMain.handle('log:dockMode', () => logMode);
+// Deferred: the page that asked is destroyed by the switch.
+ipcMain.handle('log:dock', (_e, mode) => {
+  if (!['undocked', 'bottom', 'right'].includes(mode) || mode === logMode) return;
+  setTimeout(() => { closeLog(); logMode = mode; writeJson('console.json', { mode }); openDebugConsole(); }, 0);
+});
+ipcMain.on('log:close', () => setTimeout(closeLog, 0));
 
 // ---------- menu / help ----------
 let manualWin;
@@ -357,6 +438,15 @@ ipcMain.handle('users:delete', (_e, id) => {
   // servers that used it fall back to their own (empty) credentials
   writeServers(servers().map(x => (x.userId === id ? { ...x, userId: '' } : x)));
 });
+// A server added with 'inherit the name' gets its hostname as soon as we learn it (reverse DNS after the first keep alive, or uname on connect).
+function autoRename(id, hostname) {
+  const s = servers().find(x => x.id === id);
+  const name = String(hostname || '').trim().replace(/\.$/, '').slice(0, 100);
+  if (!s?.autoName || !name || name === s.name) return;
+  patchServer(id, { name, autoName: false });
+  console.info(`Server ${s.host} renamed to its hostname: ${name}`);
+  send('servers:changed');
+}
 const patchServer = (id, patch) => writeServers(servers().map(x => (x.id === id ? { ...x, ...patch } : x)));
 
 ipcMain.handle('servers:list', () => servers().map(publicServer));
@@ -380,7 +470,9 @@ ipcMain.handle('servers:save', async (_e, s) => {
     userId: s.userId && users().some(u => u.id === s.userId) ? s.userId : '',
     passwordEnc: s.password ? enc(s.password) : prev?.passwordEnc || '',
     os: type === 'rdp' ? 'windows' : prev?.host === String(s.host) ? prev.os || '' : '', // new host: detect again
-    noProbe: !!s.noProbe, // availability checks off for this server
+    noProbe: !!s.noProbe, // keep alive checks off for this server
+    autoName: prev && String(s.name || s.host) !== prev.name ? false : s.autoName !== undefined ? !!s.autoName : prev?.autoName, // renaming by hand ends the auto name
+    // named by IP for now: the hostname replaces it once known
   };
   if (rec.team && isTeamAdmin()) await teamPut('server', rec.id, cloud.splitServer(rec).shared);
   if (rec.group && !rec.team) setGroupEnv(rec.group, rec.env, false); // a new group joins the server's environment
@@ -638,6 +730,8 @@ const exec = (conn, cmd, check = false) => new Promise((resolve, reject) => {
 // Windows answers `uname` with "'uname' is not recognized…" (cmd) or "The term 'uname' is not recognized…"
 // (PowerShell) on stderr: that error is itself the Windows signal, so no second command is needed.
 const WIN_NOT_FOUND = /is not recognized as (an internal or external command|the name of a cmdlet)|CommandNotFoundException/i;
+// "Ubuntu 22.04.4 LTS" on Linux, "macOS 14.5" on a Mac, plain `uname -sr` on anything else (BSD…).
+const OS_INFO_CMD = `(. /etc/os-release && echo "$PRETTY_NAME") 2>/dev/null || { n=$(sw_vers -productName 2>/dev/null) && echo "$n $(sw_vers -productVersion)"; } || uname -sr`;
 async function detectOs(conn) {
   let u = '';
   try { u = (await exec(conn, 'uname -s', true)).trim(); }
@@ -692,7 +786,14 @@ const openConn = serverId => new Promise((resolve, reject) => {
     c.osP.then(os => {
       if (os && os !== s.os) patchServer(serverId, { os });
       // Windows has no uname: describe it with ver for the AI prompts.
-      return exec(conn, os === 'windows' ? 'cmd /c ver' : 'uname -a').then(u => (c.uname = (os === 'windows' ? 'Windows ' : '') + u.trim()));
+      return exec(conn, os === 'windows' ? 'cmd /c ver' : 'uname -a').then(async u => {
+        c.uname = (os === 'windows' ? 'Windows ' : '') + u.trim();
+        // Distro + version, refreshed every connect and kept on the server for the details dialog / list tooltip.
+        const distro = os === 'windows' ? c.uname
+          : (await exec(conn, OS_INFO_CMD).catch(() => '')).trim().replace(/\s+/g, ' ');
+        patchServer(serverId, { osInfo: distro.slice(0, 200), kernel: os === 'windows' ? '' : c.uname.slice(0, 300), osAt: Date.now() });
+        if (os !== 'windows') autoRename(serverId, c.uname.split(/\s+/)[1]); // `uname -a`: Linux <hostname> <kernel> …
+      });
     }).catch(() => {});
     resolve(connId);
   });
@@ -830,6 +931,14 @@ ipcMain.handle('maint:dropCaches', (_e, connId) => sudoExec(connId, DROP_CACHES_
 ipcMain.handle('maint:scanDisk', async (_e, connId) =>
   parseScan(await sudoExec(connId, SCAN_CMD).catch(() => exec(getConn(connId).conn, SCAN_CMD))));
 ipcMain.handle('maint:cleanDisk', (_e, connId, ids) => sudoExec(connId, cleanCmd(Array.isArray(ids) ? ids.map(String) : [])));
+// Muted servers: no OS notifications (availability changes, metric alerts). Kept apart from servers.json so team servers can be muted per person.
+ipcMain.handle('mute:list', () => readJson('muted.json', []));
+ipcMain.handle('mute:set', (_e, ids, on) => {
+  const set = new Set(readJson('muted.json', []));
+  for (const id of (Array.isArray(ids) ? ids : []).map(String)) { if (on) set.add(id); else set.delete(id); }
+  writeJson('muted.json', [...set]);
+  return [...set];
+});
 ipcMain.handle('servers:setAlerts', (_e, id, alerts) => {
   const clean = {};
   for (const k of ['cpu', 'mem', 'disk']) {
@@ -929,10 +1038,13 @@ async function probeAll() {
   for (const k of Object.keys(avail)) delete avail[k];
   Object.assign(avail, Object.fromEntries(res));
   send('avail:update', avail);
+  for (const s of list) { // first keep alive that answers: try the hostname from reverse DNS
+    if (s.autoName && avail[s.id]?.server === 'up' && net.isIP(s.host)) require('node:dns').promises.reverse(s.host).then(n => autoRename(s.id, n[0])).catch(() => {});
+  }
 }
 function scheduleAvail() {
   clearTimeout(availTimer);
-  probeAll().catch(e => console.error('availability:', e.message))
+  probeAll().catch(e => console.error('keep alive:', e.message))
     .finally(() => { availTimer = setTimeout(scheduleAvail, availSettings().intervalSec * 1000); });
 }
 ipcMain.handle('avail:get', () => avail);
@@ -1064,9 +1176,13 @@ const S_IFMT = 0o170000, S_IFDIR = 0o040000, S_IFLNK = 0o120000;
 
 ipcMain.handle('sftp:list', async (_e, connId, dir) => {
   const sftp = await sftpOf(connId);
-  const home = await p(cb => sftp.realpath('.', cb));
+  const c = getConn(connId);
+  const home = await (c.home ||= p(cb => sftp.realpath('.', cb)).catch(e => { c.home = null; throw e; }));
   const want = !dir ? home : dir.replace(/^~(?=\/|$)/, home);
-  const real = await p(cb => sftp.realpath(want, cb));
+  // Clean absolute paths (every clicked row) skip the realpath round trip; typed relative/../ paths still resolve.
+  const real = want.startsWith('/') && !/(^|\/)\.\.?(\/|$)/.test(want)
+    ? rpath.normalize(want).replace(/(.)\/$/, '$1')
+    : await p(cb => sftp.realpath(want, cb));
   const list = await p(cb => sftp.readdir(real, cb));
   const entries = await Promise.all(list.map(async ({ filename, attrs }) => {
     const full = rpath.join(real, filename);
@@ -1097,16 +1213,42 @@ ipcMain.handle('sftp:delete', async (_e, connId, target) => {
 
 // Transfer progress for the File Manager: `sftp:progress` events (throttled) with bytes done / total.
 // total 0 = unknown size (the UI shows bytes and speed without a percentage).
-function progress(xferId, name, total) {
+function progress(xferId, name, total, target) {
   let done = 0, last = 0;
   const emit = force => {
     const now = Date.now();
     if (!xferId || (!force && now - last < 150)) return;
     last = now;
-    send('sftp:progress', xferId, { name, done, total });
+    send('sftp:progress', xferId, { name, done, total, target });
   };
   emit(true);
   return { add(n) { done += n; emit(); }, end() { done = Math.max(done, total); emit(true); } };
+}
+// Cancel / resume. Each transfer registers `stop` callbacks; Cancel runs them and the transfer rejects with "Cancelled".
+// A cancelled or broken single-file transfer leaves its partial file, and "resume" continues from that size.
+const xfers = new Map(); // xferId -> { cancelled, stops: Set<fn> }
+const xferCtl = id => { const c = { cancelled: false, stops: new Set() }; if (id) xfers.set(id, c); return c; };
+ipcMain.handle('sftp:cancel', (_e, id) => { const c = xfers.get(id); if (c) { c.cancelled = true; for (const f of [...c.stops]) f(); } });
+const CANCELLED = () => new Error('Cancelled');
+// Pipe rs -> ws counting bytes; resolves when ws is closed, rejects on any error or cancel.
+const pipeFile = (rs, ws, ctl, prog) => new Promise((resolve, reject) => {
+  const stop = () => { rs.destroy(); ws.destroy(); reject(CANCELLED()); };
+  const fail = e => { rs.destroy(); ws.destroy(); ctl.stops.delete(stop); reject(e); };
+  ctl.stops.add(stop);
+  if (ctl.cancelled) return stop();
+  rs.on('data', c => prog.add(c.length)).on('error', fail);
+  ws.on('error', fail).on('close', () => { ctl.stops.delete(stop); resolve(); });
+  rs.pipe(ws);
+});
+// Upload one file; with `resume`, continue after the bytes the server already has.
+async function putFile(sftp, local, remote, prog, ctl, resume) {
+  const size = fs.statSync(local).size;
+  const have = resume ? (await p(cb => sftp.stat(remote, cb)).catch(() => null))?.size ?? 0 : 0;
+  const start = have > 0 && have <= size ? have : 0;
+  if (start) prog.add(start);
+  if (start === size && size > 0) return; // already complete
+  await pipeFile(fs.createReadStream(local, { start, highWaterMark: 256 * 1024 }),
+    sftp.createWriteStream(remote, { flags: start ? 'r+' : 'w', start }), ctl, prog);
 }
 // Bytes of a local file or folder (what tar/SFTP will send, give or take tar headers).
 function localSize(p) {
@@ -1114,48 +1256,61 @@ function localSize(p) {
   if (!st.isDirectory()) return st.size;
   return fs.readdirSync(p).reduce((n, f) => { try { return n + localSize(path.join(p, f)); } catch { return n; } }, 0);
 }
-// fastGet/fastPut report a running total per file; turn that into increments.
-const stepper = prog => { let prev = 0; return { step: t => { prog.add(t - prev); prev = t; } }; };
 
 // Folders travel as tar.gz streams; files via SFTP.
-ipcMain.handle('sftp:download', async (_e, connId, remote, isDir, xferId) => {
+ipcMain.handle('sftp:download', async (_e, connId, remote, isDir, xferId, resumeTo) => {
   const name = rpath.basename(remote) || 'root';
-  const { canceled, filePath } = await dialog.showSaveDialog(win, {
-    defaultPath: path.join(app.getPath('downloads'), isDir ? `${name}.tar.gz` : name),
-  });
-  if (canceled) return null;
-  if (!isDir) {
-    const sftp = await sftpOf(connId);
-    const size = (await p(cb => sftp.stat(remote, cb)).catch(() => null))?.size || 0;
-    const prog = progress(xferId, name, size);
-    await p(cb => sftp.fastGet(remote, filePath, stepper(prog), cb));
-    prog.end();
-  } else {
-    const winHost = await isWin(connId);
-    const { conn } = getConn(connId);
-    // Size estimate for the percentage (Unix only); progress counts the uncompressed bytes we receive.
-    const kb = winHost ? 0 : parseInt(await exec(conn, `du -sk ${shq(remote)} 2>/dev/null | cut -f1`).catch(() => ''), 10) || 0;
-    const prog = progress(xferId, `${name}.tar.gz`, kb * 1024);
-    // Windows 10+/Server 2019+ ship tar.exe, so the same tar.gz stream works there.
-    const cmd = winHost ? winlogs.tarDirCmd(remote) : `tar czf - -C ${shq(rpath.dirname(remote))} ${shq(name)}`;
-    await new Promise((resolve, reject) => conn.exec(cmd, (err, stream) => {
-      if (err) return reject(err);
-      let errOut = '';
-      stream.stderr.on('data', d => (errOut += d));
-      const out = fs.createWriteStream(filePath);
-      const count = zlib.createGunzip().on('data', c => prog.add(c.length)).on('error', () => {}); // counting only
-      stream.on('data', d => count.write(d));
-      stream.on('exit', code => { if (code) reject(new Error(errOut.trim() || `remote tar exit ${code}`)); });
-      stream.pipe(out).on('finish', resolve).on('error', reject);
-    }));
-    prog.end();
+  let filePath = resumeTo; // resuming: same target, no dialog
+  if (!filePath) {
+    const r = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath('downloads'), isDir ? `${name}.tar.gz` : name) });
+    if (r.canceled) return null;
+    filePath = r.filePath;
   }
+  const ctl = xferCtl(xferId);
+  try {
+    if (!isDir) {
+      const sftp = await sftpOf(connId);
+      const size = (await p(cb => sftp.stat(remote, cb)).catch(() => null))?.size || 0;
+      const prog = progress(xferId, name, size, filePath);
+      const have = resumeTo && fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
+      const start = have > 0 && have <= size ? have : 0;
+      if (start) prog.add(start);
+      if (!(start === size && size > 0)) {
+        await pipeFile(sftp.createReadStream(remote, { start, highWaterMark: 256 * 1024 }),
+          fs.createWriteStream(filePath, { flags: start ? 'a' : 'w' }), ctl, prog);
+      }
+      prog.end();
+    } else {
+      const winHost = await isWin(connId);
+      const { conn } = getConn(connId);
+      // Size estimate for the percentage (Unix only); progress counts the uncompressed bytes we receive.
+      const kb = winHost ? 0 : parseInt(await exec(conn, `du -sk ${shq(remote)} 2>/dev/null | cut -f1`).catch(() => ''), 10) || 0;
+      const prog = progress(xferId, `${name}.tar.gz`, kb * 1024, filePath);
+      // Windows 10+/Server 2019+ ship tar.exe, so the same tar.gz stream works there.
+      const cmd = winHost ? winlogs.tarDirCmd(remote) : `tar czf - -C ${shq(rpath.dirname(remote))} ${shq(name)}`;
+      await new Promise((resolve, reject) => conn.exec(cmd, (err, stream) => {
+        if (err) return reject(err);
+        let errOut = '';
+        stream.stderr.on('data', d => (errOut += d));
+        const out = fs.createWriteStream(filePath);
+        const stop = () => { stream.destroy(); out.destroy(); reject(CANCELLED()); };
+        ctl.stops.add(stop);
+        if (ctl.cancelled) return stop();
+        const count = zlib.createGunzip().on('data', c => prog.add(c.length)).on('error', () => {}); // counting only
+        stream.on('data', d => count.write(d));
+        stream.on('exit', code => { if (code) reject(new Error(errOut.trim() || `remote tar exit ${code}`)); });
+        stream.on('error', reject);
+        stream.pipe(out).on('finish', resolve).on('error', reject);
+      }));
+      prog.end();
+    }
+  } finally { xfers.delete(xferId); }
   return filePath;
 });
 
 // Streams a local file or folder as tar.gz into remote `dir` (created if missing; "~/x" allowed).
 // Compressed here (not by tar) so `onBytes` can count the uncompressed bytes for progress.
-const tarUpload = (conn, local, dir, onBytes) => new Promise((resolve, reject) => {
+const tarUpload = (conn, local, dir, onBytes, ctl) => new Promise((resolve, reject) => {
   if (!fs.existsSync(local)) return reject(new Error(`Local path not found: ${local}`));
   const d = remoteDir(dir);
   conn.exec(`mkdir -p ${d} && tar xzf - -C ${d}`, (err, stream) => {
@@ -1163,40 +1318,47 @@ const tarUpload = (conn, local, dir, onBytes) => new Promise((resolve, reject) =
     const t = spawn('tar', ['cf', '-', '-C', path.dirname(local), path.basename(local)],
       { env: { ...process.env, COPYFILE_DISABLE: '1' } }); // no macOS ._ files
     t.on('error', reject);
+    const stop = () => { t.kill(); stream.destroy(); reject(CANCELLED()); };
+    ctl?.stops.add(stop);
+    if (ctl?.cancelled) return stop();
     if (onBytes) t.stdout.on('data', c => onBytes(c.length));
     t.stdout.pipe(zlib.createGzip()).pipe(stream);
     stream.on('close', code => (code ? reject(new Error(`remote tar exit ${code}`)) : resolve()));
   });
 });
 
-ipcMain.handle('sftp:upload', async (_e, connId, remoteDir, locals, xferId) => {
+ipcMain.handle('sftp:upload', async (_e, connId, remoteDir, locals, xferId, resume) => {
   if (!locals?.length) {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile', 'openDirectory', 'multiSelections'] });
     if (r.canceled) return 0;
     locals = r.filePaths;
   }
-  const sftp = await sftpOf(connId);
-  const winHost = await isWin(connId);
-  const total = locals.reduce((n, lp) => { try { return n + localSize(lp); } catch { return n; } }, 0);
-  const prog = progress(xferId, locals.length === 1 ? path.basename(locals[0]) : `${locals.length} items`, total);
-  for (const lp of locals) {
-    if (!fs.statSync(lp).isDirectory()) await p(cb => sftp.fastPut(lp, rpath.join(remoteDir, path.basename(lp)), stepper(prog), cb));
-    else if (winHost) await sftpPutDir(sftp, lp, remoteDir, prog); // no remote shell tricks on Windows: plain SFTP
-    else await tarUpload(getConn(connId).conn, lp, remoteDir, n => prog.add(n));
-  }
-  prog.end();
+  const ctl = xferCtl(xferId);
+  try {
+    const sftp = await sftpOf(connId);
+    const winHost = await isWin(connId);
+    const total = locals.reduce((n, lp) => { try { return n + localSize(lp); } catch { return n; } }, 0);
+    const prog = progress(xferId, locals.length === 1 ? path.basename(locals[0]) : `${locals.length} items`, total);
+    for (const lp of locals) {
+      if (ctl.cancelled) throw CANCELLED();
+      if (!fs.statSync(lp).isDirectory()) await putFile(sftp, lp, rpath.join(remoteDir, path.basename(lp)), prog, ctl, resume);
+      else if (winHost) await sftpPutDir(sftp, lp, remoteDir, prog, ctl, resume); // no remote shell tricks on Windows: plain SFTP
+      else await tarUpload(getConn(connId).conn, lp, remoteDir, n => prog.add(n), ctl); // folders restart (tar can't resume)
+    }
+    prog.end();
+  } finally { xfers.delete(xferId); }
   return locals.length;
 });
 
 // Folder upload file by file over SFTP (used for Windows, where `mkdir -p && tar xzf` isn't available).
-async function sftpPutDir(sftp, local, remoteParent, prog) {
+async function sftpPutDir(sftp, local, remoteParent, prog, ctl, resume) {
   const dest = rpath.join(remoteParent, path.basename(local));
   await p(cb => sftp.mkdir(dest, cb)).catch(() => {}); // already exists is fine
   for (const ent of fs.readdirSync(local, { withFileTypes: true })) {
     if (ent.name === '.DS_Store' || ent.name.startsWith('._')) continue; // macOS clutter
     const lp = path.join(local, ent.name);
-    if (ent.isDirectory()) await sftpPutDir(sftp, lp, dest, prog);
-    else if (ent.isFile()) await p(cb => sftp.fastPut(lp, rpath.join(dest, ent.name), prog ? stepper(prog) : {}, cb));
+    if (ent.isDirectory()) await sftpPutDir(sftp, lp, dest, prog, ctl, resume);
+    else if (ent.isFile()) await putFile(sftp, lp, rpath.join(dest, ent.name), prog, ctl, resume);
   }
 }
 

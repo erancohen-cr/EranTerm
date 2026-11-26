@@ -90,7 +90,7 @@
     <li><b>Group colors</b>: in the group's Edit dialog, pick a soft color (or none). It tints the group's row on Home, its entry in the side menu, and the tabs of that group's servers.</li>
     <li>The <b>State</b> column shows whether the server answers: <b>green</b> = available, <b>red</b> = not available, <b>grey</b> = not checked yet. Hover the dot for the date and time of the last check.</li>
     <li>The <b>▶ SSH</b> and <b>🖥 Desktop</b> buttons (RDP, VNC or Screen Sharing) each show a dot for their own protocol: green when its port answers, red when it doesn't. Hover for the time of the check.</li>
-    <li>Checks run in the background and never slow down the app or your connections: one quick TCP connection per port, 2 s timeout, every minute by default. Change the interval or turn checking off in <a href="#settings">Settings → Server Availability</a>; turn it off for one server with <b>Check availability</b> in its Edit dialog.</li>
+    <li>Checks run in the background and never slow down the app or your connections: one quick TCP connection per port, 2 s timeout, every minute by default. Change the interval or turn checking off in <a href="#settings">Settings → Keep alive</a>; turn it off for one server with <b>Check availability</b> in its Edit dialog.</li>
     <li>When a server goes down or comes back up, you get a desktop notification (see <a href="#settings">Settings → Notifications</a>).</li>
     <li>The <b>Alerts</b> column shows servers that are over a CPU, memory, or disk limit you set (see <a href="#metrics">Metrics</a>).</li>
     <li><b>‹</b> folds the side menu down to icons.</li>
@@ -224,7 +224,7 @@ journalctl -u {{service}} -n {{lines}} --no-pager</code></pre>
     <li><b>Server connection default module</b>: the module a server opens on when you connect: File Manager (default), Terminal, Logs or Metrics.</li>
     <li><b>Reopen the open server tabs when the app starts</b>: the tabs open when you quit (in their order, including localhost) reconnect at the next start. Off by default.</li>
   </ul>
-  <h3>Server Availability</h3>
+  <h3>Keep alive</h3>
   <ul>
     <li>Turn background checks on or off for all servers, and set how often they run (seconds, default 60), on one line.</li>
   </ul>
