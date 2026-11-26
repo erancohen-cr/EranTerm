@@ -918,3 +918,202 @@ body.folded .navgrp.closed { display: flex; } /* icon-only menu keeps every icon
 .shl { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
 .shl i { position: absolute; background: rgba(255, 211, 61, .45); outline: 1px solid #ffd33d; border-radius: 2px; }
 .shl i.cur { background: rgba(255, 140, 0, .55); outline-color: #ff8c00; }
+
+.xfer .xcancel, .xfer .xresume { flex: none; height: 26px; }
+.xfer:not(.running) .xcancel { display: none; }
+.xfer.running .xresume { display: none; }
+.xfer.running .xclose { visibility: hidden; }
+
+.xfer .xresume[hidden] { display: none; }
+.fm.one tbody tr { cursor: pointer; }
+#serversView .pagehead select { flex: none; }
+
+/* Settings -> Keyboard */
+.krow { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.krow .klabel { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kbtn { min-width: 150px; height: 30px; display: inline-flex; align-items: center; justify-content: center; }
+.kbds { display: inline-flex; gap: 4px; }
+kbd { font: 12px/1 ui-monospace, Menlo, monospace; padding: 3px 7px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; background: var(--bg); }
+.krow .sm[hidden] { display: none; }
+#keysReset { margin-top: 12px; }
+
+/* side menu: All Servers tree */
+.navtree { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 4px; }
+.navtree .navitem { height: 28px; font-size: 12.5px; }
+.navtree .tgrp { padding-left: 22px; }
+.navtree .tsrv { padding-left: 44px; gap: 8px; }
+.tcaret { display: inline-block; width: 14px; text-align: center; font-size: 10px; opacity: .7; cursor: pointer; flex: none; }
+.tcaret:hover { opacity: 1; }
+#navCaret { margin-left: 4px; }
+body.folded .navtree, body.folded #navCaret { display: none; }
+
+.tcaret { width: 20px; font-size: 15px; opacity: 1; color: var(--accent); }
+.tcaret:hover { background: var(--accent-dim); border-radius: 4px; }
+
+/* All Servers: selected row + details panel */
+tr.srow.sel td { background: var(--accent-dim); }
+tr.srow { cursor: pointer; }
+.srvpanel { width: 320px; flex: none; border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 16px 18px; }
+.srvpanel[hidden] { display: none; }
+.srvpanel .sphead { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 15px; }
+.srvpanel .sphead b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srvpanel .kv td:first-child { white-space: nowrap; }
+.srvpanel .kv td:last-child { word-break: break-word; }
+.srvpanel .spacts { display: flex; gap: 8px; margin-top: 16px; }
+.srvpanel { order: 2; }
+
+/* server details (All Servers panel, tab menu dialog) */
+.dpanel { display: flex; flex-direction: column; gap: 14px; }
+.dstate { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); font-size: 13px; }
+.dstate .av { width: 9px; height: 9px; }
+.dstate .proto { margin-left: auto; }
+.dstate.up { color: var(--accent); }
+.dstate.down { color: var(--error); }
+.dsec { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); overflow: hidden; }
+.dsec h6 { margin: 0; padding: 7px 12px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); background: var(--panel2); border-bottom: 1px solid var(--line); }
+.dfield { display: grid; grid-template-columns: 78px 1fr; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.dfield:last-child { border-bottom: 0; }
+.dk { color: var(--muted); font-size: 12px; }
+.dv { min-width: 0; word-break: break-word; }
+.dv.unk { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.dv.unk i { font-style: italic; }
+.dinfo { padding: 0 4px; font-size: 14px; color: var(--accent); }
+.dnote { grid-column: 1 / -1; font-size: 12px; line-height: 1.45; color: var(--muted); background: var(--panel2); border-radius: 6px; padding: 8px 10px; }
+.dnote[hidden] { display: none; }
+.dnotes { margin: 0; padding: 10px 12px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+
+/* a long All Servers tree scrolls inside the menu instead of running over the footer */
+.side { min-height: 0; }
+.navgrp[data-grp="workspace"] { min-height: 0; flex: 0 1 auto; }
+.navgrp[data-grp="workspace"] > .navitem { flex: none; }
+.navtree { flex: 0 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.navtree .navitem { flex: none; }
+
+/* app footer: roomier, softer buttons */
+#appFooter { padding: 7px 14px; gap: 8px; min-height: 44px; box-sizing: border-box; }
+#appFooter button { padding: 5px 14px; font-size: 12px; border-radius: 8px; border: 1px solid transparent; color: var(--muted); transition: background .15s, color .15s, border-color .15s; }
+#appFooter button:hover { background: var(--panel2); color: var(--fg); border-color: var(--line); }
+#appFooter button.on { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+#appFooter .ftbig { width: 36px; height: 32px; padding: 0; font-size: 18px; border-radius: 9px; }
+#appFooter .ftbig:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+.ftacct { font-size: 12px; gap: 8px; }
+
+/* side menu: fold arrows on the right, big enough to see */
+h6.navsec::before { content: none; }
+h6.navsec::after { content: '▾'; margin-left: auto; font-size: 17px; line-height: 1; padding: 0 4px; color: var(--accent); transition: transform .15s; }
+h6.navsec.closed::after { transform: rotate(-90deg); }
+h6.navsec:hover::after { color: var(--fg); }
+.navtree .tgrp .tcaret { order: 9; margin-left: 2px; }
+.tcaret { font-size: 18px; width: 24px; line-height: 1; }
+#navCaret { margin-left: 6px; }
+
+#appFooter .ftbig svg { display: block; }
+#appFooter .ftbig { color: var(--fg); opacity: .8; }
+#appFooter .ftbig:hover { opacity: 1; }
+.ftuser { cursor: pointer; }
+.ftuser:hover { color: var(--accent); }
+
+.srvid .ssys { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; font-size: 11px; }
+.dnote p { margin: 0 0 6px; }
+.dnote button { margin-top: 2px; }
+
+/* long All Servers tree: a bordered, scroll-shadowed box so it reads as its own list, apart from Favorites below */
+.navtree {
+  border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 3px 0; margin: 4px 0 8px;
+  background:
+    linear-gradient(var(--panel) 30%, transparent) top / 100% 36px no-repeat local,
+    linear-gradient(transparent, var(--panel) 70%) bottom / 100% 36px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, rgba(0, 0, 0, .35), transparent) top / 100% 10px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, .35), transparent) bottom / 100% 10px no-repeat scroll,
+    var(--panel);
+}
+
+.dk .dinfo { all: unset; cursor: pointer; margin-left: 5px; font: italic 700 13px/1 Georgia, 'Times New Roman', serif; color: var(--accent); padding: 0 3px; }
+.dk .dinfo:hover { color: var(--fg); }
+.srvpanel { position: relative; min-width: 260px; max-width: 720px; }
+.srvpanel::before { content: ''; position: absolute; left: -3px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 3; }
+.srvpanel:hover::before { background: linear-gradient(90deg, transparent, var(--accent-dim)); }
+body.resizing { user-select: none; cursor: col-resize; }
+
+/* All Servers: the sticky table header must reach the very top of the scroll area, so the page's top padding moves inside */
+.content:has(> #serversView:not([hidden])) { padding-top: 0; }
+#serversView { padding-top: 28px; }
+
+/* availability filter: compact, colored */
+.afilter { position: relative; flex: none; }
+.afbtn { height: 32px; box-sizing: border-box; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; font-size: 12px; min-width: 118px; }
+.afbtn .afcar { margin-left: auto; opacity: .6; }
+.afmenu { position: absolute; top: 36px; left: 0; z-index: 20; min-width: 150px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); box-shadow: 0 8px 24px rgba(0, 0, 0, .35); display: flex; flex-direction: column; gap: 2px; }
+.afmenu[hidden] { display: none; }
+.afopt { display: flex; align-items: center; gap: 8px; border: 0; background: transparent; padding: 6px 8px; font-size: 12px; border-radius: 6px; text-align: left; }
+.afopt:hover { background: var(--panel2); }
+.afdot { width: 9px; height: 9px; border-radius: 50%; background: var(--line2); flex: none; }
+.afdot.up { background: #2fb457; } .aft.up { color: #2fb457; }
+.afdot.down { background: #e5484d; } .aft.down { color: #e5484d; }
+.afdot.none { background: #f5b26b; } .aft.none { color: #f5b26b; }
+#serversView .pagehead .afopt { height: auto; width: 100%; }
+
+body { box-sizing: border-box; padding-right: var(--dock-r, 0); padding-bottom: var(--dock-b, 0); } /* room for the docked Log Console */
+
+/* server History: bottom dock inside the server page (a native view is laid over this box) */
+.histdock { flex: none; height: 300px; border-top: 1px solid var(--line); background: var(--bg); }
+.histdock[hidden] { display: none; }
+.navitem.histnav.active { background: var(--accent-dim); color: var(--accent); box-shadow: inset 2px 0 var(--accent); }
+
+.xfer .xcancel { width: 28px; height: 28px; padding: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); background: var(--bg); border: 1px solid var(--line); transition: color .15s, background .15s, border-color .15s; }
+.xfer .xcancel:hover { color: #fff; background: var(--error); border-color: var(--error); }
+
+.histgrip { flex: none; height: 7px; margin-top: -3px; cursor: row-resize; position: relative; z-index: 3; background: transparent; }
+.histgrip::after { content: ''; position: absolute; left: 50%; top: 2px; width: 44px; height: 3px; margin-left: -22px; border-radius: 2px; background: var(--line2); }
+.histgrip:hover::after { background: var(--accent); }
+.histgrip[hidden] { display: none; }
+body.vresizing { cursor: row-resize; user-select: none; }
+.histdock { min-height: 100px; }
+
+/* mute (speaker) buttons */
+.mutebtn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 28px; padding: 0; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 8px; transition: color .15s, background .15s; }
+.mutebtn:hover { color: var(--fg); background: var(--panel2); border-color: var(--line); }
+.mutebtn.muted { color: var(--error); }
+.mutebtn svg { display: block; }
+.grprow .gacts:has(.mutebtn.muted) { opacity: 1; }
+.srvhead .smute, .srvhead .sinfobtn { flex: none; }
+.sinfobtn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+
+/* server Info window (right side of the server page) */
+.sinfo { width: 340px; flex: none; border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 16px 18px; }
+.sinfo[hidden] { display: none; }
+.sinfo .sphead { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 15px; }
+.sinfo .sphead b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sitabs { display: flex; gap: 2px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+.sitabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: 7px 10px; font-weight: 600; }
+.sitabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+.dmute { padding: 10px 12px; }
+.dmutenote { display: block; padding: 0 12px 10px; line-height: 1.45; }
+.sinfo .spacts { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* mute buttons: always visible; compact variant inside rows / chips */
+.mutebtn.sm { width: 22px; height: 22px; flex: none; }
+.mutebtn.sm svg { width: 15px; height: 15px; }
+.mutebtn { cursor: pointer; }
+.mutebtn.muted { color: var(--error); }
+.grprow .grpmute { margin-left: 8px; margin-right: 76px; flex: none; }
+.navtree .navitem .mutebtn { margin-left: auto; }
+.navtree .navitem .mutebtn.sm { margin-left: 4px; }
+.dchip .mutebtn { margin-left: 2px; }
+
+/* top tabs keep one fixed height when the window narrows: names truncate instead of wrapping */
+#tabs { overflow-x: auto; scrollbar-width: none; }
+#tabs::-webkit-scrollbar { display: none; }
+.tab { flex: 0 1 190px; min-width: 96px; height: 34px; box-sizing: border-box; align-items: center; overflow: hidden; white-space: nowrap; }
+.tab > span:first-child { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tab .x { flex: none; }
+#homeTab { flex: none; min-width: 0; }
+.tabtools { flex: none; white-space: nowrap; }
+
+/* one mute button size everywhere: same as the All Servers row buttons (30x28, 20px speaker) */
+.mutebtn, .mutebtn.sm { width: 30px; height: 28px; }
+.mutebtn svg, .mutebtn.sm svg { width: 20px; height: 20px; }
+.navtree .navitem .mutebtn { height: 26px; margin-top: -2px; margin-bottom: -2px; }
+/* Environments page: icon buttons as big as the server row buttons */
+#envsView button.icon { width: 30px; height: 28px; padding: 0; font-size: 17px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
+#envsView .envcard .envhead, #envsView .envghead { gap: 6px; }
